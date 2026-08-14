@@ -75,12 +75,30 @@ Shopify  -->  n8n workflow (Shopify node + Webhook)  -->  Flask app (Render)  --
          // Shipping charge on the order — this is what the app uses to tell
          // COD orders from Prepaid ones (see Settings -> Schedule in the
          // app). Shopify usually has this on total_shipping_price_set.
-         shipping_amount:
-           (order.total_shipping_price_set && order.total_shipping_price_set.shop_money
-             ? order.total_shipping_price_set.shop_money.amount
-             : null) ||
-           order.total_shipping_price ||
-           (order.shipping_lines && order.shipping_lines[0] ? order.shipping_lines[0].price : 0),
+         //
+         // IMPORTANT: only read shipping_lines[0] as a last-resort fallback,
+         // and sum ALL of them, not just the first. Orders with a single
+         // item almost always have exactly one shipping_lines entry, so
+         // shipping_lines[0] happened to work — but Shopify can attach more
+         // than one shipping line to an order (e.g. items with different
+         // shipping profiles), and multi-item orders are far more likely to
+         // hit that case. Reading only index 0 silently drops the rest of
+         // the delivery charge for those orders.
+         shipping_amount: (() => {
+           const setAmount = order.total_shipping_price_set
+             && order.total_shipping_price_set.shop_money
+             && order.total_shipping_price_set.shop_money.amount;
+           if (setAmount !== undefined && setAmount !== null && setAmount !== "") {
+             return Number(setAmount);
+           }
+           if (order.total_shipping_price !== undefined && order.total_shipping_price !== null && order.total_shipping_price !== "") {
+             return Number(order.total_shipping_price);
+           }
+           if (Array.isArray(order.shipping_lines) && order.shipping_lines.length) {
+             return order.shipping_lines.reduce((sum, line) => sum + Number(line.price || 0), 0);
+           }
+           return 0;
+         })(),
          line_items: (order.line_items || []).map(li => ({
            id: li.id,
            title: li.title,
@@ -113,7 +131,21 @@ Shopify node vs. a raw HTTP Request, and I'll put that file together too.
 
 **Already have this workflow set up?** Open your existing Code node, replace
 it with the snippet above, save, and re-activate the workflow — then click
-**Sync from Shopify** in the app again. Sync always refreshes an order's
+**Sync from Shopify** in the app again.
+
+> **Fixing "delivery charge missing on multi-item orders":** this app never
+> calculates the delivery charge itself — it just stores whatever
+> `shipping_amount` the Code node above sends per order. If single-item
+> orders got their delivery charge but multi-item orders didn't, the old
+> version of this snippet was the cause: it only read
+> `shipping_lines[0].price`, so if Shopify attached more than one shipping
+> line to an order (more common once there's more than one item in the
+> cart), everything past the first line was silently dropped. The snippet
+> above now sums every `shipping_lines` entry as a fallback, and prefers
+> `total_shipping_price_set` first, which is the order's true total
+> regardless of item count. Paste the updated snippet into your Code node,
+> re-activate, and re-sync — it'll refresh `shipping_amount` on every order
+> it touches, past orders included, without resetting any item statuses. Sync always refreshes an order's
 details (including address) even for orders it's already seen, so this
 backfills shipping addresses onto orders you synced before this change,
 without duplicating anything or touching item statuses you've already set.

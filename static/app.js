@@ -184,6 +184,7 @@ function renderOrders(orders) {
     const assignedTo = order.assigned_to
       ? `<span class="assigned-to">Assigned: ${escapeHtml(order.assigned_to)}</span>`
       : "";
+    const showInvoiceBtn = currentFilter === "billing";
     head.innerHTML = `
       <span class="order-head-left">
         <span class="order-name">${escapeHtml(order.order_name)}</span>
@@ -192,8 +193,16 @@ function renderOrders(orders) {
         ${paymentBadge}
         ${assignedTo}
       </span>
-      ${currentRole === "owner" ? `<button type="button" class="order-history-link" data-order-id="${escapeHtml(order.order_id)}">History</button>` : ""}
+      <span class="order-head-actions">
+        ${showInvoiceBtn ? `<button type="button" class="btn btn-ghost btn-small order-invoice-link" data-order-id="${escapeHtml(order.order_id)}">${order.invoice_number ? "Reprint Invoice" : "Print Invoice"}</button>` : ""}
+        ${currentRole === "owner" ? `<button type="button" class="order-history-link" data-order-id="${escapeHtml(order.order_id)}">History</button>` : ""}
+      </span>
     `;
+    if (showInvoiceBtn) {
+      head.querySelector(".order-invoice-link").addEventListener("click", () => {
+        window.open(`/api/orders/${encodeURIComponent(order.order_id)}/invoice.pdf`, "_blank");
+      });
+    }
     if (currentRole === "owner") {
       head.querySelector(".order-history-link").addEventListener("click", () => openActivityLogForOrder(order.order_id));
     }

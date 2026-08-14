@@ -13,8 +13,10 @@ import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 import requests
-from flask import Flask, g, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, g, jsonify, redirect, render_template, request, session, send_file, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
+
+from invoice import build_invoice_pdf
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 VALID_STATUSES = {"pending", "purchased", "stock", "na"}
@@ -145,6 +147,8 @@ def init_db():
         ALTER TABLE items ADD COLUMN IF NOT EXISTS packed_at TEXT;
         ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS order_id TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_amount NUMERIC;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_number TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_date TEXT;
         """
     )
     # Migration: tables created before the 'packer' role existed have a CHECK
@@ -932,12 +936,72 @@ def api_orders():
                 "closed": closed,
                 "payment_type": payment_type,
                 "assigned_to": assigned_to,
+                "invoice_number": order["invoice_number"],
                 "items": [dict(i) for i in items],
             }
         )
 
     cur.close()
     return jsonify(result)
+
+
+@app.route("/api/orders/<order_id>/invoice.pdf", methods=["GET"])
+@login_required
+def api_order_invoice(order_id):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT * FROM orders WHERE shopify_order_id = %s", (order_id,))
+    order = cur.fetchone()
+    if not order:
+        cur.close()
+        return jsonify({"error": "Order not found"}), 404
+
+    cur.execute(
+        "SELECT * FROM items WHERE shopify_order_id = %s ORDER BY sort_order",
+        (order_id,),
+    )
+    all_items = cur.fetchall()
+
+    # Same "Billing" rule used by /api/orders: the order must be fully
+    # closed (no item left pending) and have at least one purchased/in-stock
+    # item — that's what actually appears on the invoice.
+    closed = bool(all_items) and all(i["status"] != "pending" for i in all_items)
+    billing_items = [i for i in all_items if i["status"] in ("purchased", "stock")]
+    if not closed or not billing_items:
+        cur.close()
+        return jsonify({"error": "This order isn't in Billing yet."}), 400
+
+    if not order["invoice_number"]:
+        # Assign the next number from a continuous counter (starts at 2501)
+        # the first time this order is printed, and lock the settings row
+        # while doing it so two people printing at once can't collide on
+        # the same number. Once set, it's stored on the order so reprinting
+        # later always returns the same invoice number.
+        cur.execute("SELECT value FROM settings WHERE key = %s FOR UPDATE", ("invoice_seq_next",))
+        row = cur.fetchone()
+        seq = int(row["value"]) if row else 2501
+        cur.execute(
+            "INSERT INTO settings (key, value) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            ("invoice_seq_next", str(seq + 1)),
+        )
+        now = datetime.now()
+        invoice_date = now.strftime("%-d-%b-%y")
+        invoice_number = f"SHP/{seq}/{now.year}"
+        cur.execute(
+            "UPDATE orders SET invoice_number = %s, invoice_date = %s WHERE shopify_order_id = %s",
+            (invoice_number, invoice_date, order_id),
+        )
+        db.commit()
+    else:
+        invoice_number = order["invoice_number"]
+        invoice_date = order["invoice_date"]
+
+    cur.close()
+
+    pdf_buf = build_invoice_pdf(dict(order), [dict(i) for i in billing_items], invoice_number, invoice_date)
+    filename = invoice_number.replace("/", "-") + ".pdf"
+    return send_file(pdf_buf, mimetype="application/pdf", as_attachment=False, download_name=filename)
 
 
 @app.route("/api/items/<item_id>/status", methods=["POST"])

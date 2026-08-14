@@ -251,6 +251,17 @@ main {
 }
 .order-history-link:hover { color: var(--ink); background: var(--gray-bg); }
 
+.order-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.order-invoice-link {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .item-row {
   display: grid;
   grid-template-columns: 1fr auto auto auto;
