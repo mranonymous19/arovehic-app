@@ -1,0 +1,13 @@
+# Local environment
+venv/
+env/
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets - never commit real credentials
+.env
+
+# OS/editor cruft
+.DS_Store
+*.swp

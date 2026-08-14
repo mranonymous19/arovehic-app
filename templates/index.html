@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shopify Purchase Tracker</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Shopify Purchase Tracker</h1>
+    <div class="topbar-actions">
+      <button id="syncBtn" class="btn btn-primary" hidden>Sync from Shopify</button>
+      <button id="pasteOrderBtn" class="btn btn-ghost" hidden>Add Order (paste)</button>
+      <button id="settingsBtn" class="btn btn-ghost" hidden>Settings</button>
+      <button id="usersBtn" class="btn btn-ghost" hidden>Manage Users</button>
+      <button id="activityLogBtn" class="btn btn-ghost" hidden>Activity Log</button>
+      <span id="userBadge" class="user-badge"></span>
+      <button id="accountBtn" class="btn btn-ghost">Account</button>
+      <a href="{{ url_for('logout') }}" class="btn btn-ghost">Log out</a>
+    </div>
+  </header>
+
+  <div id="syncMsg" class="banner" hidden></div>
+
+  <div class="filters">
+    <input id="orderTrackInput" type="search" placeholder="Track an order — name, customer, or Order ID" class="order-track-input">
+    <button class="filter-btn active" data-status="">All</button>
+    <button class="filter-btn" data-status="pending">Pending</button>
+    <button class="filter-btn" data-status="purchased">Purchased</button>
+    <button class="filter-btn" data-status="stock">In Stock</button>
+    <button class="filter-btn" data-status="na">N/A</button>
+    <button class="filter-btn" data-status="closed">Closed</button>
+    <button class="filter-btn" data-status="billing">Billing</button>
+  </div>
+
+  <main id="ordersContainer"></main>
+
+  <!-- Settings modal (owner only) -->
+  <div id="settingsModal" class="modal" hidden>
+    <div class="modal-box">
+      <h2>Settings</h2>
+      <label for="webhookInput">n8n webhook URL (returns Shopify orders as JSON)</label>
+      <input id="webhookInput" type="text" placeholder="https://your-n8n-instance.app/webhook/orders">
+      <div class="modal-actions">
+        <button id="saveSettingsBtn" class="btn btn-primary">Save</button>
+        <button id="closeSettingsBtn" class="btn btn-ghost">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Account modal (everyone) -->
+  <div id="accountModal" class="modal" hidden>
+    <div class="modal-box">
+      <h2>Account</h2>
+      <p class="modal-subtext">Signed in as <strong id="accountName"></strong> (<span id="accountRole"></span>)</p>
+      <label for="currentPasswordInput">Current password</label>
+      <input id="currentPasswordInput" type="password" autocomplete="current-password">
+      <label for="newPasswordInput">New password</label>
+      <input id="newPasswordInput" type="password" autocomplete="new-password" placeholder="At least 4 characters">
+      <div id="accountError" class="field-error" hidden></div>
+      <div class="modal-actions">
+        <button id="savePasswordBtn" class="btn btn-primary">Change password</button>
+        <button id="closeAccountBtn" class="btn btn-ghost">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Manage Users modal (owner only) -->
+  <div id="usersModal" class="modal" hidden>
+    <div class="modal-box modal-box-wide">
+      <h2>Manage Users</h2>
+
+      <table class="users-table">
+        <thead>
+          <tr><th>Name</th><th>Role</th><th></th></tr>
+        </thead>
+        <tbody id="usersTableBody"></tbody>
+      </table>
+
+      <h3 class="modal-subheading">Add a user</h3>
+      <div class="form-grid">
+        <div class="form-row">
+          <label for="newUserName">Name</label>
+          <input id="newUserName" type="text" placeholder="Name">
+        </div>
+        <div class="form-row">
+          <label for="newUserPassword">Password</label>
+          <input id="newUserPassword" type="password" placeholder="At least 4 characters">
+        </div>
+        <div class="form-row">
+          <label for="newUserRole">Role</label>
+          <select id="newUserRole">
+            <option value="staff">Staff — can update item status</option>
+            <option value="telecaller">Telecaller — view only</option>
+            <option value="packer">Packer — can mark items packed</option>
+            <option value="owner">Owner — full control</option>
+          </select>
+        </div>
+      </div>
+      <div id="usersError" class="field-error" hidden></div>
+      <div class="modal-actions">
+        <button id="addUserBtn" class="btn btn-primary">Add user</button>
+        <button id="closeUsersBtn" class="btn btn-ghost">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add order manually via paste (owner only) -->
+  <div id="pasteOrderModal" class="modal" hidden>
+    <div class="modal-box modal-box-wide">
+      <h2>Add Order (paste)</h2>
+      <p class="modal-subtext">
+        For orders that don't come through Shopify. Paste the Order ID, then a blank line,
+        then Customer name / Address / Pincode / Mob: number, then a blank line, then
+        Vendor / Item name, then a blank line, then the amount. Paste multiple orders
+        back-to-back the same way to add several at once.
+      </p>
+      <textarea id="pasteOrderText" rows="12" placeholder="99274755211786194813416
+
+SHAMSHUL TABREZ
+132 A First Floor Tirhan Vivanta Residency Tapukara Alwar rajasthan
+301707
+Mob: 9927475521
+
+HERO SUPER SPLENDOR
+Seat Lock Bracket
+
+88 + 60 Received"></textarea>
+      <p id="pasteOrderError" class="field-error" hidden></p>
+      <div class="modal-actions">
+        <button id="closePasteOrderBtn" class="btn btn-ghost">Cancel</button>
+        <button id="submitPasteOrderBtn" class="btn btn-primary">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Activity log (owner only) -->
+  <div id="activityLogModal" class="modal" hidden>
+    <div class="modal-box modal-box-wide">
+      <h2>Activity Log</h2>
+      <p class="modal-subtext">Who added, changed, or synced what — most recent first.</p>
+      <input id="activityLogSearch" type="search" placeholder="Search (item, order, staff name...)">
+      <div id="activityLogList"><p class="empty-log">Loading…</p></div>
+      <div class="modal-actions">
+        <button id="closeActivityLogBtn" class="btn btn-ghost">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

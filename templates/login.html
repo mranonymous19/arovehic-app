@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Log in — Shopify Purchase Tracker</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="login-body">
+  <div class="login-wrap">
+    <div class="login-card">
+      <h1 class="login-title">Shopify Purchase Tracker</h1>
+
+      {% if error %}
+      <div class="banner error login-banner">{{ error }}</div>
+      {% endif %}
+
+      <form method="POST" action="{{ url_for('login') }}" class="login-form">
+        <div class="form-row">
+          <label for="name">Name</label>
+          <input id="name" type="text" name="name" required autofocus autocomplete="username" placeholder="Your name">
+        </div>
+        <div class="form-row">
+          <label for="password">Password</label>
+          <input id="password" type="password" name="password" required autocomplete="current-password" placeholder="••••••••">
+        </div>
+        <button type="submit" class="btn btn-primary login-btn">Log in</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>
