@@ -141,6 +141,52 @@ a.btn { text-decoration: none; display: inline-block; }
   border-color: var(--ink);
 }
 
+.date-filter-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.date-filter-input {
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 6px 10px;
+  font-size: 12px;
+  background: var(--card);
+  color: var(--ink);
+  font-family: 'Inter', sans-serif;
+}
+
+.filter-divider {
+  width: 1px;
+  align-self: stretch;
+  background: var(--line);
+  margin: 0 4px;
+}
+
+.payment-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.payment-badge-cod {
+  color: var(--amber);
+  background: var(--amber-bg);
+  border: 1px solid var(--amber);
+}
+.payment-badge-prepaid {
+  color: var(--green);
+  background: var(--green-bg);
+  border: 1px solid var(--green);
+}
+
+.assigned-to {
+  font-size: 11px;
+  color: var(--muted);
+}
+
 main {
   padding: 20px 28px 60px;
   display: flex;

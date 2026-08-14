@@ -144,6 +144,7 @@ def init_db():
         ALTER TABLE items ADD COLUMN IF NOT EXISTS packed_by TEXT;
         ALTER TABLE items ADD COLUMN IF NOT EXISTS packed_at TEXT;
         ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS order_id TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_amount NUMERIC;
         """
     )
     # Migration: tables created before the 'packer' role existed have a CHECK
@@ -541,7 +542,14 @@ def api_delete_user(user_id):
 @app.route("/api/settings", methods=["GET"])
 @owner_required
 def api_get_settings():
-    return jsonify({"n8n_webhook_url": get_setting("n8n_webhook_url", "")})
+    return jsonify({
+        "n8n_webhook_url": get_setting("n8n_webhook_url", ""),
+        # COD/Prepaid scheduling — see the "Routes - COD/Prepaid scheduling"
+        # section below for how these are used.
+        "cod_shipping_threshold": get_setting("cod_shipping_threshold", "140"),
+        "cod_staff_id": get_setting("cod_staff_id", ""),
+        "prepaid_staff_id": get_setting("prepaid_staff_id", ""),
+    })
 
 
 @app.route("/api/settings", methods=["POST"])
@@ -556,6 +564,68 @@ def api_save_settings():
     db.commit()
     cur.close()
     return jsonify({"ok": True, "n8n_webhook_url": url})
+
+
+# ---------------------------------------------------------------------------
+# Routes - COD/Prepaid scheduling (owner only)
+#
+# Payment type isn't a separate field synced from Shopify — the owner told
+# us it's implied by the shipping charge on the order (e.g. Rs 140 shipping
+# means COD, Rs 70/75 means Prepaid). So instead of hardcoding that, we
+# store a single threshold: any order with shipping_amount >= threshold is
+# COD, everything below it is Prepaid. That threshold, plus which staff
+# member is on COD duty vs Prepaid duty, is saved here — assignment is a
+# standing rule ("X handles all COD orders"), not something set per order,
+# so every order (past and future) always reflects the current rule.
+# ---------------------------------------------------------------------------
+
+@app.route("/api/settings/schedule", methods=["GET"])
+@owner_required
+def api_get_schedule_settings():
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT id, name FROM users WHERE role = 'staff' ORDER BY name")
+    staff = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    return jsonify({
+        "cod_shipping_threshold": get_setting("cod_shipping_threshold", "140"),
+        "cod_staff_id": get_setting("cod_staff_id", ""),
+        "prepaid_staff_id": get_setting("prepaid_staff_id", ""),
+        "staff": staff,
+    })
+
+
+@app.route("/api/settings/schedule", methods=["POST"])
+@owner_required
+def api_save_schedule_settings():
+    data = request.get_json(force=True) or {}
+    threshold_raw = data.get("cod_shipping_threshold", "140")
+    try:
+        threshold = float(threshold_raw)
+    except (TypeError, ValueError):
+        return jsonify({"error": "COD shipping threshold must be a number"}), 400
+    if threshold < 0:
+        return jsonify({"error": "COD shipping threshold can't be negative"}), 400
+
+    cod_staff_id = str(data.get("cod_staff_id") or "").strip()
+    prepaid_staff_id = str(data.get("prepaid_staff_id") or "").strip()
+
+    set_setting("cod_shipping_threshold", str(threshold))
+    set_setting("cod_staff_id", cod_staff_id)
+    set_setting("prepaid_staff_id", prepaid_staff_id)
+
+    db = get_db()
+    cur = db.cursor()
+    log_activity(cur, None, "schedule", "settings",
+                 f"{session['name']} updated COD/Prepaid staff scheduling")
+    db.commit()
+    cur.close()
+    return jsonify({
+        "ok": True,
+        "cod_shipping_threshold": str(threshold),
+        "cod_staff_id": cod_staff_id,
+        "prepaid_staff_id": prepaid_staff_id,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -606,11 +676,25 @@ def api_sync():
         full_address = ", ".join(p for p in [address1, address2, city, state, pincode] if p)
         customer_phone = addr.get("phone") or order.get("phone") or ""
 
+        # Shipping charge — this is what COD vs Prepaid is derived from (see
+        # Settings -> Schedule). Accept a couple of shapes since it depends
+        # on how the n8n Code node reshapes the Shopify order.
+        shipping_amount_raw = (
+            order.get("shipping_amount")
+            or order.get("total_shipping_price")
+            or ""
+        )
+        try:
+            shipping_amount = float(shipping_amount_raw) if shipping_amount_raw != "" else None
+        except (TypeError, ValueError):
+            shipping_amount = None
+
         cur.execute(
             "INSERT INTO orders (shopify_order_id, order_name, customer_name, "
             "shipping_address, shipping_address1, shipping_address2, shipping_city, "
-            "shipping_state, shipping_pincode, customer_phone, created_at, synced_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "shipping_state, shipping_pincode, customer_phone, shipping_amount, "
+            "created_at, synced_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (shopify_order_id) DO UPDATE SET "
             "order_name = EXCLUDED.order_name, customer_name = EXCLUDED.customer_name, "
             "shipping_address = EXCLUDED.shipping_address, "
@@ -620,9 +704,10 @@ def api_sync():
             "shipping_state = EXCLUDED.shipping_state, "
             "shipping_pincode = EXCLUDED.shipping_pincode, "
             "customer_phone = EXCLUDED.customer_phone, "
+            "shipping_amount = EXCLUDED.shipping_amount, "
             "created_at = EXCLUDED.created_at, synced_at = EXCLUDED.synced_at",
             (order_id, order_name, customer_name, full_address, address1, address2,
-             city, state, pincode, customer_phone, created_at, now),
+             city, state, pincode, customer_phone, shipping_amount, created_at, now),
         )
         order_count += 1
 
@@ -740,9 +825,38 @@ def api_orders():
     db = get_db()
     cur = db.cursor()
     status_filter = request.args.get("status")
+    payment_filter = request.args.get("payment")  # 'cod' or 'prepaid'
+    date_from = request.args.get("date_from")  # 'YYYY-MM-DD', inclusive
+    date_to = request.args.get("date_to")      # 'YYYY-MM-DD', inclusive
 
-    cur.execute("SELECT * FROM orders ORDER BY created_at DESC")
+    # created_at is stored as ISO-8601 text (as it comes from Shopify), so
+    # cast it to a date for the range comparison rather than a string match.
+    query = "SELECT * FROM orders WHERE 1=1"
+    params = []
+    if date_from:
+        # NULLIF guards against a blank/unparseable created_at (e.g. odd
+        # sync data) throwing a cast error — it just won't match instead.
+        query += " AND NULLIF(created_at, '')::date >= %s::date"
+        params.append(date_from)
+    if date_to:
+        query += " AND NULLIF(created_at, '')::date <= %s::date"
+        params.append(date_to)
+    query += " ORDER BY created_at DESC"
+    cur.execute(query, params)
     orders = cur.fetchall()
+
+    # COD/Prepaid is derived from each order's shipping charge against the
+    # threshold set in Settings -> Schedule, not stored per order — so
+    # changing the threshold or the staff assignment always applies
+    # retroactively to every order, past and future.
+    cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
+    cod_staff_id = get_setting("cod_staff_id", "")
+    prepaid_staff_id = get_setting("prepaid_staff_id", "")
+    staff_names = {}
+    staff_ids = [sid for sid in (cod_staff_id, prepaid_staff_id) if sid]
+    if staff_ids:
+        cur.execute("SELECT id, name FROM users WHERE id = ANY(%s)", ([int(s) for s in staff_ids],))
+        staff_names = {str(r["id"]): r["name"] for r in cur.fetchall()}
 
     # Fetch items for ALL orders in a single query instead of one query per
     # order (N+1), then group them in Python. This turns "1 + (1 per order)"
@@ -768,6 +882,21 @@ def api_orders():
         # actual statuses and needs no separate "reopen" bookkeeping: if
         # an item goes back to pending, the order just stops being closed.
         closed = bool(items) and all(i["status"] != "pending" for i in items)
+
+        shipping_amount = order["shipping_amount"]
+        if shipping_amount is None:
+            # No shipping charge synced (e.g. a manually-pasted order) —
+            # payment type can't be derived, so leave it unset rather than
+            # guessing.
+            payment_type = None
+            assigned_to = None
+        else:
+            payment_type = "cod" if float(shipping_amount) >= cod_threshold else "prepaid"
+            assigned_staff_id = cod_staff_id if payment_type == "cod" else prepaid_staff_id
+            assigned_to = staff_names.get(str(assigned_staff_id)) if assigned_staff_id else None
+
+        if payment_filter in ("cod", "prepaid") and payment_type != payment_filter:
+            continue
 
         if status_filter == "closed":
             # Every item in the order, as long as the order itself is closed.
@@ -801,6 +930,8 @@ def api_orders():
                 "shipping_pincode": order["shipping_pincode"],
                 "created_at": order["created_at"],
                 "closed": closed,
+                "payment_type": payment_type,
+                "assigned_to": assigned_to,
                 "items": [dict(i) for i in items],
             }
         )

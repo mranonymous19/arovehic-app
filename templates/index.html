@@ -34,6 +34,20 @@
     <button class="filter-btn" data-status="billing">Billing</button>
   </div>
 
+  <div class="filters">
+    <label class="date-filter-label" for="dateFromInput">From</label>
+    <input id="dateFromInput" type="date" class="date-filter-input">
+    <label class="date-filter-label" for="dateToInput">To</label>
+    <input id="dateToInput" type="date" class="date-filter-input">
+    <button id="clearDateFilterBtn" class="btn btn-ghost btn-small" hidden>Clear dates</button>
+
+    <span class="filter-divider"></span>
+
+    <button class="filter-btn active" data-payment="">All payments</button>
+    <button class="filter-btn" data-payment="cod">COD</button>
+    <button class="filter-btn" data-payment="prepaid">Prepaid</button>
+  </div>
+
   <main id="ordersContainer"></main>
 
   <!-- Settings modal (owner only) -->
@@ -45,6 +59,23 @@
       <div class="modal-actions">
         <button id="saveSettingsBtn" class="btn btn-primary">Save</button>
         <button id="closeSettingsBtn" class="btn btn-ghost">Cancel</button>
+      </div>
+
+      <h3 class="modal-subheading">Schedule — COD / Prepaid staff</h3>
+      <p class="modal-subtext">
+        Payment type is derived from each order's shipping charge. Orders with
+        shipping at or above the threshold are COD; below it, Prepaid. Assign
+        which staff account handles each — applies to every order automatically.
+      </p>
+      <label for="codThresholdInput">COD shipping threshold (₹)</label>
+      <input id="codThresholdInput" type="number" step="0.01" min="0" placeholder="140">
+      <label for="codStaffSelect">Staff assigned to COD orders</label>
+      <select id="codStaffSelect"><option value="">— none —</option></select>
+      <label for="prepaidStaffSelect">Staff assigned to Prepaid orders</label>
+      <select id="prepaidStaffSelect"><option value="">— none —</option></select>
+      <div id="scheduleError" class="field-error" hidden></div>
+      <div class="modal-actions">
+        <button id="saveScheduleBtn" class="btn btn-primary">Save schedule</button>
       </div>
     </div>
   </div>

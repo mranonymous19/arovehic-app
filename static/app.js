@@ -13,6 +13,9 @@ const ROLE_LABELS = {
 };
 
 let currentFilter = "";
+let currentPaymentFilter = "";
+let currentDateFrom = "";
+let currentDateTo = "";
 let currentRole = null;
 let currentName = "";
 let lastLoadedOrders = [];
@@ -27,7 +30,17 @@ const settingsModal = document.getElementById("settingsModal");
 const webhookInput = document.getElementById("webhookInput");
 const saveSettingsBtn = document.getElementById("saveSettingsBtn");
 const closeSettingsBtn = document.getElementById("closeSettingsBtn");
-const filterButtons = document.querySelectorAll(".filter-btn");
+const filterButtons = document.querySelectorAll(".filter-btn[data-status]");
+const paymentFilterButtons = document.querySelectorAll(".filter-btn[data-payment]");
+const dateFromInput = document.getElementById("dateFromInput");
+const dateToInput = document.getElementById("dateToInput");
+const clearDateFilterBtn = document.getElementById("clearDateFilterBtn");
+
+const codThresholdInput = document.getElementById("codThresholdInput");
+const codStaffSelect = document.getElementById("codStaffSelect");
+const prepaidStaffSelect = document.getElementById("prepaidStaffSelect");
+const scheduleError = document.getElementById("scheduleError");
+const saveScheduleBtn = document.getElementById("saveScheduleBtn");
 
 const pasteOrderBtn = document.getElementById("pasteOrderBtn");
 const pasteOrderModal = document.getElementById("pasteOrderModal");
@@ -106,7 +119,12 @@ function canTogglePacked() {
 // ---------------------------------------------------------------------------
 
 async function loadOrders() {
-  const url = currentFilter ? `/api/orders?status=${currentFilter}` : "/api/orders";
+  const params = new URLSearchParams();
+  if (currentFilter) params.set("status", currentFilter);
+  if (currentPaymentFilter) params.set("payment", currentPaymentFilter);
+  if (currentDateFrom) params.set("date_from", currentDateFrom);
+  if (currentDateTo) params.set("date_to", currentDateTo);
+  const url = params.toString() ? `/api/orders?${params.toString()}` : "/api/orders";
   const res = await fetch(url);
   const orders = await res.json();
   lastLoadedOrders = orders;
@@ -160,11 +178,19 @@ function renderOrders(orders) {
 
     const head = document.createElement("div");
     head.className = "order-head";
+    const paymentBadge = order.payment_type
+      ? `<span class="payment-badge payment-badge-${order.payment_type}">${order.payment_type === "cod" ? "COD" : "Prepaid"}</span>`
+      : "";
+    const assignedTo = order.assigned_to
+      ? `<span class="assigned-to">Assigned: ${escapeHtml(order.assigned_to)}</span>`
+      : "";
     head.innerHTML = `
       <span class="order-head-left">
         <span class="order-name">${escapeHtml(order.order_name)}</span>
         <span class="customer">${escapeHtml(order.customer_name || "")}</span>
         ${order.closed ? `<span class="order-closed-badge">Closed</span>` : ""}
+        ${paymentBadge}
+        ${assignedTo}
       </span>
       ${currentRole === "owner" ? `<button type="button" class="order-history-link" data-order-id="${escapeHtml(order.order_id)}">History</button>` : ""}
     `;
@@ -377,6 +403,44 @@ filterButtons.forEach((btn) => {
   });
 });
 
+paymentFilterButtons.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    paymentFilterButtons.forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    currentPaymentFilter = btn.dataset.payment;
+    loadOrders();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Date range filter
+// ---------------------------------------------------------------------------
+
+function updateClearDateFilterVisibility() {
+  clearDateFilterBtn.hidden = !currentDateFrom && !currentDateTo;
+}
+
+dateFromInput.addEventListener("change", () => {
+  currentDateFrom = dateFromInput.value;
+  updateClearDateFilterVisibility();
+  loadOrders();
+});
+
+dateToInput.addEventListener("change", () => {
+  currentDateTo = dateToInput.value;
+  updateClearDateFilterVisibility();
+  loadOrders();
+});
+
+clearDateFilterBtn.addEventListener("click", () => {
+  currentDateFrom = "";
+  currentDateTo = "";
+  dateFromInput.value = "";
+  dateToInput.value = "";
+  updateClearDateFilterVisibility();
+  loadOrders();
+});
+
 // ---------------------------------------------------------------------------
 // Settings modal (owner only)
 // ---------------------------------------------------------------------------
@@ -386,6 +450,8 @@ settingsBtn.addEventListener("click", async () => {
   const data = await res.json();
   webhookInput.value = data.n8n_webhook_url || "";
   settingsModal.hidden = false;
+  scheduleError.hidden = true;
+  await loadScheduleSettings();
 });
 
 closeSettingsBtn.addEventListener("click", () => { settingsModal.hidden = true; });
@@ -398,6 +464,51 @@ saveSettingsBtn.addEventListener("click", async () => {
   });
   settingsModal.hidden = true;
   showMessage("Webhook URL saved.");
+});
+
+// ---------------------------------------------------------------------------
+// Schedule settings (owner only — COD/Prepaid staff assignment)
+// ---------------------------------------------------------------------------
+
+async function loadScheduleSettings() {
+  const res = await fetch("/api/settings/schedule");
+  if (!res.ok) return;
+  const data = await res.json();
+  codThresholdInput.value = data.cod_shipping_threshold || "140";
+
+  const fillStaffSelect = (select, selectedId) => {
+    select.innerHTML = `<option value="">— none —</option>`;
+    for (const s of data.staff) {
+      const opt = document.createElement("option");
+      opt.value = s.id;
+      opt.textContent = s.name;
+      if (String(s.id) === String(selectedId)) opt.selected = true;
+      select.appendChild(opt);
+    }
+  };
+  fillStaffSelect(codStaffSelect, data.cod_staff_id);
+  fillStaffSelect(prepaidStaffSelect, data.prepaid_staff_id);
+}
+
+saveScheduleBtn.addEventListener("click", async () => {
+  scheduleError.hidden = true;
+  const res = await fetch("/api/settings/schedule", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      cod_shipping_threshold: codThresholdInput.value,
+      cod_staff_id: codStaffSelect.value,
+      prepaid_staff_id: prepaidStaffSelect.value,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    scheduleError.textContent = data.error || "Could not save schedule.";
+    scheduleError.hidden = false;
+    return;
+  }
+  showMessage("Schedule saved.");
+  loadOrders();
 });
 
 // ---------------------------------------------------------------------------
@@ -545,6 +656,7 @@ const ACTIVITY_ACTION_LABELS = {
   delete_user: "Removed user",
   reset_password: "Password reset",
   settings: "Settings",
+  schedule: "Schedule",
 };
 
 activityLogBtn.addEventListener("click", async () => {

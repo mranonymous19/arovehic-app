@@ -72,6 +72,15 @@ Shopify  -->  n8n workflow (Shopify node + Webhook)  -->  Flask app (Render)  --
          // digital/no-shipping order) — the app tries shipping_address.phone
          // first, then this.
          phone: order.phone || (order.customer ? order.customer.phone : "") || "",
+         // Shipping charge on the order — this is what the app uses to tell
+         // COD orders from Prepaid ones (see Settings -> Schedule in the
+         // app). Shopify usually has this on total_shipping_price_set.
+         shipping_amount:
+           (order.total_shipping_price_set && order.total_shipping_price_set.shop_money
+             ? order.total_shipping_price_set.shop_money.amount
+             : null) ||
+           order.total_shipping_price ||
+           (order.shipping_lines && order.shipping_lines[0] ? order.shipping_lines[0].price : 0),
          line_items: (order.line_items || []).map(li => ({
            id: li.id,
            title: li.title,
@@ -208,8 +217,32 @@ way since it lives in Supabase, not on Render's disk.
   this; Telecaller accounts see the pills but can't change them.
 - Use the filter bar at the top to show only orders containing items of a
   given status (handy for "show me everything still Pending").
+- Use the **From / To date** fields to narrow the order list to a date
+  range (based on the Shopify order date).
+- **COD / Prepaid** filter buttons show only orders of that payment type.
+  Payment type is derived from the order's shipping charge — see
+  **Settings -> Schedule** below.
 - **Manage Users** (owner only, top right) adds/removes accounts and resets
   passwords. **Account** (everyone) changes your own password.
+
+## 8. COD / Prepaid staff scheduling (owner only)
+
+Open **Settings** and go to the **Schedule** section:
+
+- **COD shipping threshold** — orders with a shipping charge at or above
+  this amount are treated as COD; below it, Prepaid. Default is 140 (so
+  shipping of 140 = COD, 70 or 75 = Prepaid). Change this any time your
+  shipping charges change — it applies to every order immediately, past
+  and future.
+- **COD staff** / **Prepaid staff** — pick which staff account is
+  responsible for each payment type. Every order's card shows its
+  COD/Prepaid tag and who's assigned, and you can filter the order list to
+  just one payment type using the filter bar.
+
+This is a standing rule, not something you set per order — assign the
+staff once and every order (synced now or later) follows it automatically.
+Orders with no shipping charge synced (e.g. manually pasted ones) show no
+payment type or assignment.
 
 ## 7. Files
 
