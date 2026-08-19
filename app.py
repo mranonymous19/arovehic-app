@@ -999,7 +999,17 @@ def api_order_invoice(order_id):
 
     cur.close()
 
-    pdf_buf = build_invoice_pdf(dict(order), [dict(i) for i in billing_items], invoice_number, invoice_date)
+    # Same COD/Prepaid rule used by /api/orders — derived from the shipping
+    # charge against the threshold in Settings -> Schedule, not stored per
+    # order, so it always reflects the current threshold.
+    order_dict = dict(order)
+    cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
+    shipping_amount = order_dict.get("shipping_amount")
+    order_dict["payment_type"] = (
+        "cod" if shipping_amount is not None and float(shipping_amount) >= cod_threshold else "prepaid"
+    )
+
+    pdf_buf = build_invoice_pdf(order_dict, [dict(i) for i in billing_items], invoice_number, invoice_date)
     filename = invoice_number.replace("/", "-") + ".pdf"
     return send_file(pdf_buf, mimetype="application/pdf", as_attachment=False, download_name=filename)
 

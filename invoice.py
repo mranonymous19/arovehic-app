@@ -327,18 +327,29 @@ def build_invoice_pdf(order, items, invoice_number, invoice_date_str):
     c.line(x_mid, terms_top, x1, terms_top)
     _text(c, x_mid + 4, terms_top - 10, "Terms of Delivery", font="Helvetica", size=7.5)
 
+    # payment_type is passed in by app.py, derived from the order's shipping
+    # charge against the COD threshold in Settings -> Schedule (same rule
+    # used everywhere else in the app). Falls back to that same 140 default
+    # here too, in case this is ever called without it set.
+    payment_type = order.get("payment_type")
+    if payment_type not in ("cod", "prepaid"):
+        cod_threshold = float(order.get("cod_shipping_threshold") or 140)
+        payment_type = "cod" if delivery_amount >= cod_threshold else "prepaid"
+    if payment_type == "cod":
+        payment_text = f"Rs. {fmt_amount(grand_total)} Amount to be Received"
+    else:
+        payment_text = "Amount is Received"
+    _text(c, x_mid + 4, terms_top - 25, payment_text, font="Helvetica-Bold", size=9)
+
     y = box_bottom
 
     # ---- item table ---------------------------------------------------
     cols = [
         ("Sl\nNo.", 25),
-        ("Description of Goods", 200),
-        ("HSN/SAC", 55),
-        ("GST\nRate", 45),
+        ("Description of Goods", 300),
         ("Quantity", 55),
         ("Rate", 55),
-        ("per", 30),
-        ("Amount", 70),
+        ("Amount", 100),
     ]
     col_x = [x0]
     for _, w in cols:
@@ -382,22 +393,21 @@ def build_invoice_pdf(order, items, invoice_number, invoice_date_str):
         _text(c, col_x[0] + cols[0][1] / 2, ry - 12, str(idx), size=8, align="center")
         for wline_i, wline in enumerate(wrapped):
             _text(c, col_x[1] + 3, ry - 12 - wline_i * 9, wline, font="Helvetica-Bold", size=8)
-        _text(c, col_x[3] + cols[3][1] / 2, ry - 12, f"{int(GST_RATE*100)} %", size=8, align="center")
-        _text(c, col_x[4] + cols[4][1] - 4, ry - 12, f"{li['qty']} nos", size=8, align="right")
-        _text(c, col_x[5] + cols[5][1] - 4, ry - 12, fmt_amount(li["unit_rate_excl"]), size=8, align="right")
-        _text(c, col_x[6] + cols[6][1] / 2, ry - 12, "nos", size=8, align="center")
-        _text(c, col_x[7] + cols[7][1] - 4, ry - 12, fmt_amount(li["amount"]), font="Helvetica-Bold", size=8, align="right")
+        _text(c, col_x[2] + cols[2][1] - 4, ry - 12, f"{li['qty']} nos", size=8, align="right")
+        _text(c, col_x[3] + cols[3][1] - 4, ry - 12, fmt_amount(li["unit_rate_excl"]), size=8, align="right")
+        _text(c, col_x[4] + cols[4][1] - 4, ry - 12, fmt_amount(li["amount"]), font="Helvetica-Bold", size=8, align="right")
         ry -= row_h
 
+    # GST/IGST is applied once here, on the invoice total — not per item.
+    # The rate is stated in the description text itself, so no separate
+    # GST-rate column is needed.
     _text(c, col_x[1] + 3, ry - 12, f"Output Igst {int(GST_RATE*100)}%", font="Helvetica-Oblique", size=8)
-    _text(c, col_x[5] + cols[5][1] - 4, ry - 12, f"{int(GST_RATE*100)}", size=8, align="right")
-    _text(c, col_x[6] + cols[6][1] / 2, ry - 12, "%", size=8, align="center")
-    _text(c, col_x[7] + cols[7][1] - 4, ry - 12, fmt_amount(igst_amount), font="Helvetica-Bold", size=8, align="right")
+    _text(c, col_x[4] + cols[4][1] - 4, ry - 12, fmt_amount(igst_amount), font="Helvetica-Bold", size=8, align="right")
     ry -= BASE_ROW_H
 
     if delivery_amount:
         _text(c, col_x[1] + 3, ry - 12, "DELIVERY CHARGE", font="Helvetica-Oblique", size=8)
-        _text(c, col_x[7] + cols[7][1] - 4, ry - 12, fmt_amount(delivery_amount), font="Helvetica-Bold", size=8, align="right")
+        _text(c, col_x[4] + cols[4][1] - 4, ry - 12, fmt_amount(delivery_amount), font="Helvetica-Bold", size=8, align="right")
         ry -= BASE_ROW_H
 
     # table borders: outer rect (header+body), column separators, header/body divider
@@ -411,11 +421,11 @@ def build_invoice_pdf(order, items, invoice_number, invoice_date_str):
     total_top = body_bottom
     total_bottom = total_top - TOTAL_ROW_H
     c.rect(x0, total_bottom, x1 - x0, TOTAL_ROW_H)
-    c.line(col_x[4], total_bottom, col_x[4], total_top)  # divider before Quantity total
-    c.line(col_x[7], total_bottom, col_x[7], total_top)  # divider before Amount total
-    _text(c, col_x[4] - 4, total_bottom + 7, "Total", font="Helvetica-Bold", size=9, align="right")
-    _text(c, col_x[4] + cols[4][1] - 4, total_bottom + 7, f"{total_qty} nos", font="Helvetica-Bold", size=8.5, align="right")
-    _text(c, col_x[7] + cols[7][1] - 4, total_bottom + 7, f"Rs. {fmt_amount(grand_total)}", font="Helvetica-Bold", size=9.5, align="right")
+    c.line(col_x[2], total_bottom, col_x[2], total_top)  # divider before Quantity total
+    c.line(col_x[4], total_bottom, col_x[4], total_top)  # divider before Amount total
+    _text(c, col_x[2] - 4, total_bottom + 7, "Total", font="Helvetica-Bold", size=9, align="right")
+    _text(c, col_x[2] + cols[2][1] - 4, total_bottom + 7, f"{total_qty} nos", font="Helvetica-Bold", size=8.5, align="right")
+    _text(c, col_x[4] + cols[4][1] - 4, total_bottom + 7, f"Rs. {fmt_amount(grand_total)}", font="Helvetica-Bold", size=9.5, align="right")
 
     y = total_bottom
 
