@@ -10,6 +10,7 @@ const ROLE_LABELS = {
   staff: "Staff",
   telecaller: "Telecaller",
   packer: "Packer",
+  accounts: "Accounts",
 };
 
 let currentFilter = "";
@@ -107,6 +108,18 @@ async function loadMe() {
   settingsBtn.hidden = !isOwner;
   usersBtn.hidden = !isOwner;
   activityLogBtn.hidden = !isOwner;
+
+  if (currentRole === "accounts") {
+    // Accounts only ever needs the Billing view (what's ready to invoice,
+    // and whether it's been printed yet) — hide every other status tab and
+    // lock the view to Billing, enforced server-side too in /api/orders.
+    filterButtons.forEach((btn) => {
+      if (btn.dataset.status !== "billing") btn.hidden = true;
+    });
+    currentFilter = "billing";
+    filterButtons.forEach((b) => b.classList.toggle("active", b.dataset.status === "billing"));
+    invoiceFilterRow.hidden = false;
+  }
 }
 
 function canEditStatus() {

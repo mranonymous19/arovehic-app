@@ -20,7 +20,7 @@ from invoice import build_invoice_pdf
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 VALID_STATUSES = {"pending", "purchased", "stock", "na"}
-VALID_ROLES = {"owner", "staff", "telecaller", "packer"}
+VALID_ROLES = {"owner", "staff", "telecaller", "packer", "accounts"}
 
 app = Flask(__name__)
 # Needed for signed session cookies (login). Set a real SECRET_KEY env var
@@ -135,7 +135,7 @@ def init_db():
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
-            role TEXT NOT NULL CHECK (role IN ('owner', 'staff', 'telecaller', 'packer')),
+            role TEXT NOT NULL CHECK (role IN ('owner', 'staff', 'telecaller', 'packer', 'accounts')),
             created_at TEXT
         );
 
@@ -173,14 +173,14 @@ def init_db():
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_date TEXT;
         """
     )
-    # Migration: tables created before the 'packer' role existed have a CHECK
-    # constraint that would reject it — widen it so packer accounts can be
-    # created on older databases too.
+    # Migration: tables created before the 'packer'/'accounts' roles existed
+    # have a CHECK constraint that would reject them — widen it so those
+    # accounts can be created on older databases too.
     cur.execute(
         """
         ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
         ALTER TABLE users ADD CONSTRAINT users_role_check
-            CHECK (role IN ('owner', 'staff', 'telecaller', 'packer'));
+            CHECK (role IN ('owner', 'staff', 'telecaller', 'packer', 'accounts'));
         """
     )
     # Seed a default owner account on first run, so there's always a way in.
@@ -313,10 +313,14 @@ def _parse_pasted_order(block_group):
 # ---------------------------------------------------------------------------
 # Auth helpers
 #
-# Three roles:
+# Five roles:
 #   owner      - full control: sync, settings, status updates, manage users.
-#   staff      - can update item status only.
+#   staff      - can update item status only; only sees orders currently
+#                assigned to them (see /api/orders below).
 #   telecaller - view-only: can see orders and items, nothing else.
+#   packer     - can toggle the packed flag only.
+#   accounts   - view-only, restricted to the Billing view: which orders
+#                are ready to invoice and whether each has been printed yet.
 # ---------------------------------------------------------------------------
 
 def current_user():
@@ -855,6 +859,11 @@ def api_orders():
     date_from = request.args.get("date_from")  # 'YYYY-MM-DD', inclusive
     date_to = request.args.get("date_to")      # 'YYYY-MM-DD', inclusive
 
+    # Accounts is a Billing-only role — enforced here, not just hidden in
+    # the UI, so it can't be bypassed by calling the API directly.
+    if session.get("role") == "accounts":
+        status_filter = "billing"
+
     # created_at is stored as ISO-8601 text (as it comes from Shopify), so
     # cast it to a date for the range comparison rather than a string match.
     query = "SELECT * FROM orders WHERE 1=1"
@@ -915,11 +924,20 @@ def api_orders():
             # payment type can't be derived, so leave it unset rather than
             # guessing.
             payment_type = None
+            assigned_staff_id = None
             assigned_to = None
         else:
             payment_type = "cod" if float(shipping_amount) >= cod_threshold else "prepaid"
             assigned_staff_id = cod_staff_id if payment_type == "cod" else prepaid_staff_id
             assigned_to = staff_names.get(str(assigned_staff_id)) if assigned_staff_id else None
+
+        # Staff accounts only see orders currently assigned to them (their
+        # COD/Prepaid duty from Settings -> Schedule) — everyone else
+        # (owner, telecaller, packer, accounts) sees the full list, subject
+        # to whatever other filters apply below.
+        if session.get("role") == "staff":
+            if not assigned_staff_id or str(assigned_staff_id) != str(session.get("user_id")):
+                continue
 
         if payment_filter in ("cod", "prepaid") and payment_type != payment_filter:
             continue
@@ -1036,6 +1054,23 @@ def api_order_invoice(order_id):
     return send_file(pdf_buf, mimetype="application/pdf", as_attachment=False, download_name=filename)
 
 
+def order_assigned_to_user(cur, order_id, user_id):
+    """True if `order_id`'s current COD/Prepaid duty staff is `user_id`.
+
+    Mirrors the assignment logic in /api/orders — used to stop a staff
+    account from editing items on an order that isn't (or is no longer)
+    assigned to them, even via a direct API call.
+    """
+    cur.execute("SELECT shipping_amount FROM orders WHERE shopify_order_id = %s", (order_id,))
+    order = cur.fetchone()
+    if not order or order["shipping_amount"] is None:
+        return False
+    cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
+    payment_type = "cod" if float(order["shipping_amount"]) >= cod_threshold else "prepaid"
+    assigned_staff_id = get_setting("cod_staff_id" if payment_type == "cod" else "prepaid_staff_id", "")
+    return bool(assigned_staff_id) and str(assigned_staff_id) == str(user_id)
+
+
 @app.route("/api/items/<item_id>/status", methods=["POST"])
 @staff_or_owner_required
 def api_update_item_status(item_id):
@@ -1046,6 +1081,14 @@ def api_update_item_status(item_id):
 
     db = get_db()
     cur = db.cursor()
+
+    if session.get("role") == "staff":
+        cur.execute("SELECT shopify_order_id FROM items WHERE id = %s", (item_id,))
+        item_row = cur.fetchone()
+        if not item_row or not order_assigned_to_user(cur, item_row["shopify_order_id"], session["user_id"]):
+            cur.close()
+            return jsonify({"error": "This order isn't assigned to you"}), 403
+
     now = datetime.now(timezone.utc).isoformat()
     # Read the previous value and write the new one in a single round-trip
     # (self-join against the pre-update row) instead of a separate SELECT
