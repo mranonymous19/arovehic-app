@@ -55,8 +55,22 @@ def get_pool():
 
 def get_db():
     if "db" not in g:
-        g.db = get_pool().getconn()
-        g.db.cursor_factory = psycopg2.extras.RealDictCursor
+        pool = get_pool()
+        conn = pool.getconn()
+        # Supabase's connection pooler (Supavisor/PgBouncer) can close an
+        # idle connection on its end at any time. Our pool doesn't know
+        # that until something tries to use it and gets
+        # "server closed the connection unexpectedly". So do a cheap
+        # liveness check here and discard+replace a dead connection
+        # before it ever reaches a real query.
+        try:
+            with conn.cursor() as probe:
+                probe.execute("SELECT 1")
+        except psycopg2.Error:
+            pool.putconn(conn, close=True)
+            conn = pool.getconn()
+        conn.cursor_factory = psycopg2.extras.RealDictCursor
+        g.db = conn
     return g.db
 
 
@@ -65,7 +79,15 @@ def close_db(exception=None):
     db = g.pop("db", None)
     if db is not None:
         if exception is not None:
-            db.rollback()
+            try:
+                db.rollback()
+            except psycopg2.Error:
+                # Connection is actually dead (this is usually the real
+                # cause of the request failing in the first place) —
+                # close it instead of returning a broken connection to
+                # the pool for the next request to trip over.
+                get_pool().putconn(db, close=True)
+                return
         get_pool().putconn(db)
 
 
