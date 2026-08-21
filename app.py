@@ -1051,7 +1051,14 @@ def api_order_invoice(order_id):
 
     pdf_buf = build_invoice_pdf(order_dict, [dict(i) for i in billing_items], invoice_number, invoice_date)
     filename = invoice_number.replace("/", "-") + ".pdf"
-    return send_file(pdf_buf, mimetype="application/pdf", as_attachment=False, download_name=filename)
+    response = send_file(pdf_buf, mimetype="application/pdf", as_attachment=False, download_name=filename)
+    # So the frontend can flip the Printed/Not-Printed badge right away,
+    # from this same request/response, instead of needing a page refresh
+    # or a second round-trip to find out what number got assigned.
+    response.headers["X-Invoice-Number"] = invoice_number
+    response.headers["X-Invoice-Date"] = invoice_date
+    response.headers["Access-Control-Expose-Headers"] = "X-Invoice-Number, X-Invoice-Date"
+    return response
 
 
 def order_assigned_to_user(cur, order_id, user_id):

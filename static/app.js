@@ -176,6 +176,44 @@ orderTrackInput.addEventListener("input", () => {
   }, 200);
 });
 
+async function printInvoice(orderId, buttonEl) {
+  // Open the tab synchronously, inside the click handler, so browsers don't
+  // treat it as an unrequested popup — we fill in its location once the
+  // fetch below resolves.
+  const tab = window.open("", "_blank");
+  const originalLabel = buttonEl.textContent;
+  buttonEl.disabled = true;
+  buttonEl.textContent = "Printing…";
+  try {
+    const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/invoice.pdf`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      if (tab) tab.close();
+      showMessage(data.error || "Could not generate the invoice.", true);
+      return;
+    }
+    const invoiceNumber = res.headers.get("X-Invoice-Number");
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    if (tab) tab.location = blobUrl;
+
+    // Update this order's badge/button right now, from what this same
+    // request just told us — no page refresh, no waiting for the next
+    // full order-list reload.
+    if (invoiceNumber) {
+      const order = lastLoadedOrders.find((o) => o.order_id === orderId);
+      if (order) order.invoice_number = invoiceNumber;
+      renderOrders(filterByTrackQuery(lastLoadedOrders));
+    }
+  } catch (err) {
+    if (tab) tab.close();
+    showMessage("Could not reach the server to print the invoice.", true);
+  } finally {
+    buttonEl.disabled = false;
+    buttonEl.textContent = originalLabel;
+  }
+}
+
 function renderOrders(orders) {
   ordersContainer.innerHTML = "";
 
@@ -229,8 +267,8 @@ function renderOrders(orders) {
       </span>
     `;
     if (showInvoiceBtn) {
-      head.querySelector(".order-invoice-link").addEventListener("click", () => {
-        window.open(`/api/orders/${encodeURIComponent(order.order_id)}/invoice.pdf`, "_blank");
+      head.querySelector(".order-invoice-link").addEventListener("click", (e) => {
+        printInvoice(order.order_id, e.currentTarget);
       });
     }
     if (currentRole === "owner") {
