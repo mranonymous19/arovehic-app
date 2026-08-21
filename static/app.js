@@ -14,6 +14,7 @@ const ROLE_LABELS = {
 
 let currentFilter = "";
 let currentPaymentFilter = "";
+let currentInvoiceFilter = "";
 let currentDateFrom = "";
 let currentDateTo = "";
 let currentRole = null;
@@ -32,6 +33,8 @@ const saveSettingsBtn = document.getElementById("saveSettingsBtn");
 const closeSettingsBtn = document.getElementById("closeSettingsBtn");
 const filterButtons = document.querySelectorAll(".filter-btn[data-status]");
 const paymentFilterButtons = document.querySelectorAll(".filter-btn[data-payment]");
+const invoiceFilterRow = document.getElementById("invoiceFilterRow");
+const invoiceFilterButtons = document.querySelectorAll(".filter-btn[data-invoice]");
 const dateFromInput = document.getElementById("dateFromInput");
 const dateToInput = document.getElementById("dateToInput");
 const clearDateFilterBtn = document.getElementById("clearDateFilterBtn");
@@ -133,14 +136,22 @@ async function loadOrders() {
 
 function filterByTrackQuery(orders) {
   const q = orderTrackQuery.trim().toLowerCase();
-  if (!q) return orders;
-  return orders.filter((order) => {
-    return (
-      (order.order_name || "").toLowerCase().includes(q) ||
-      (order.customer_name || "").toLowerCase().includes(q) ||
-      (order.order_id || "").toLowerCase().includes(q)
+  let result = orders;
+  if (q) {
+    result = result.filter((order) => {
+      return (
+        (order.order_name || "").toLowerCase().includes(q) ||
+        (order.customer_name || "").toLowerCase().includes(q) ||
+        (order.order_id || "").toLowerCase().includes(q)
+      );
+    });
+  }
+  if (currentFilter === "billing" && currentInvoiceFilter) {
+    result = result.filter((order) =>
+      currentInvoiceFilter === "printed" ? !!order.invoice_number : !order.invoice_number
     );
-  });
+  }
+  return result;
 }
 
 let orderTrackDebounce;
@@ -185,12 +196,18 @@ function renderOrders(orders) {
       ? `<span class="assigned-to">Assigned: ${escapeHtml(order.assigned_to)}</span>`
       : "";
     const showInvoiceBtn = currentFilter === "billing";
+    const invoiceBadge = showInvoiceBtn
+      ? (order.invoice_number
+          ? `<span class="invoice-badge invoice-badge-printed">Invoice Printed · ${escapeHtml(order.invoice_number)}</span>`
+          : `<span class="invoice-badge invoice-badge-not-printed">Not Printed</span>`)
+      : "";
     head.innerHTML = `
       <span class="order-head-left">
         <span class="order-name">${escapeHtml(order.order_name)}</span>
         <span class="customer">${escapeHtml(order.customer_name || "")}</span>
         ${order.closed ? `<span class="order-closed-badge">Closed</span>` : ""}
         ${paymentBadge}
+        ${invoiceBadge}
         ${assignedTo}
       </span>
       <span class="order-head-actions">
@@ -408,6 +425,11 @@ filterButtons.forEach((btn) => {
     filterButtons.forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
     currentFilter = btn.dataset.status;
+    invoiceFilterRow.hidden = currentFilter !== "billing";
+    if (currentFilter !== "billing") {
+      currentInvoiceFilter = "";
+      invoiceFilterButtons.forEach((b) => b.classList.toggle("active", b.dataset.invoice === ""));
+    }
     loadOrders();
   });
 });
@@ -418,6 +440,15 @@ paymentFilterButtons.forEach((btn) => {
     btn.classList.add("active");
     currentPaymentFilter = btn.dataset.payment;
     loadOrders();
+  });
+});
+
+invoiceFilterButtons.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    invoiceFilterButtons.forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    currentInvoiceFilter = btn.dataset.invoice;
+    renderOrders(filterByTrackQuery(lastLoadedOrders));
   });
 });
 

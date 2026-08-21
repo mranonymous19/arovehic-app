@@ -34,6 +34,13 @@
     <button class="filter-btn" data-status="billing">Billing</button>
   </div>
 
+  <div id="invoiceFilterRow" class="filters" hidden>
+    <span class="date-filter-label">Invoice</span>
+    <button class="filter-btn active" data-invoice="">All</button>
+    <button class="filter-btn" data-invoice="printed">Printed</button>
+    <button class="filter-btn" data-invoice="not_printed">Not printed</button>
+  </div>
+
   <div class="filters">
     <label class="date-filter-label" for="dateFromInput">From</label>
     <input id="dateFromInput" type="date" class="date-filter-input">
