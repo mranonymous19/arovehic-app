@@ -78,6 +78,7 @@ const savePasswordBtn = document.getElementById("savePasswordBtn");
 const closeAccountBtn = document.getElementById("closeAccountBtn");
 
 const usersBtn = document.getElementById("usersBtn");
+const trashBtn = document.getElementById("trashBtn");
 const usersModal = document.getElementById("usersModal");
 const usersTableBody = document.getElementById("usersTableBody");
 const newUserName = document.getElementById("newUserName");
@@ -121,6 +122,7 @@ async function loadMe() {
   settingsBtn.hidden = !isOwner;
   usersBtn.hidden = !isOwner;
   activityLogBtn.hidden = !isOwner;
+  trashBtn.hidden = !isOwner;
 
   if (currentRole === "accounts") {
     // Accounts only ever needs the Billing view (what's ready to invoice,
@@ -136,10 +138,12 @@ async function loadMe() {
 }
 
 function canEditStatus() {
+  if (currentFilter === "trash") return false;
   return currentRole === "owner" || currentRole === "staff";
 }
 
 function canTogglePacked() {
+  if (currentFilter === "trash") return false;
   return currentRole === "owner" || currentRole === "packer";
 }
 
@@ -190,7 +194,7 @@ orderTrackInput.addEventListener("input", () => {
 });
 
 async function deleteOrder(orderId, orderName) {
-  const ok = confirm(`Delete order ${orderName || orderId}? This removes it and all its items permanently — this can't be undone.`);
+  const ok = confirm(`Move order ${orderName || orderId} to Trash? You can restore it later from Trash if needed.`);
   if (!ok) return;
   const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}`, { method: "DELETE" });
   const data = await res.json().catch(() => ({}));
@@ -200,7 +204,19 @@ async function deleteOrder(orderId, orderName) {
   }
   lastLoadedOrders = lastLoadedOrders.filter((o) => o.order_id !== orderId);
   renderOrders(filterByTrackQuery(lastLoadedOrders));
-  showMessage(`Deleted ${orderName || orderId}.`);
+  showMessage(`Moved ${orderName || orderId} to Trash.`);
+}
+
+async function restoreOrder(orderId, orderName) {
+  const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/restore`, { method: "POST" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    showMessage(data.error || "Could not restore the order.", true);
+    return;
+  }
+  lastLoadedOrders = lastLoadedOrders.filter((o) => o.order_id !== orderId);
+  renderOrders(filterByTrackQuery(lastLoadedOrders));
+  showMessage(`Restored ${orderName || orderId}.`);
 }
 
 async function printInvoice(orderId, buttonEl) {
@@ -256,7 +272,7 @@ function renderOrders(orders) {
     ordersContainer.innerHTML = `
       <div class="empty-state">
         <div class="glyph">— empty manifest —</div>
-        <p>No orders yet.${currentRole === "owner" ? " Set your n8n webhook in Settings, then hit Sync from Shopify." : " Ask an owner to sync from Shopify."}</p>
+        <p>${currentFilter === "trash" ? "Trash is empty." : `No orders yet.${currentRole === "owner" ? " Set your n8n webhook in Settings, then hit Sync from Shopify." : " Ask an owner to sync from Shopify."}`}</p>
       </div>`;
     return;
   }
@@ -291,7 +307,8 @@ function renderOrders(orders) {
       <span class="order-head-actions">
         ${showInvoiceBtn ? `<button type="button" class="btn btn-ghost btn-small order-invoice-link" data-order-id="${escapeHtml(order.order_id)}">${order.invoice_number ? "Reprint Invoice" : "Print Invoice"}</button>` : ""}
         ${currentRole === "owner" ? `<button type="button" class="order-history-link" data-order-id="${escapeHtml(order.order_id)}">History</button>` : ""}
-        ${currentRole === "owner" ? `<button type="button" class="btn btn-ghost btn-small btn-danger order-delete-link" data-order-id="${escapeHtml(order.order_id)}">Delete</button>` : ""}
+        ${currentRole === "owner" && currentFilter === "trash" ? `<button type="button" class="btn btn-primary btn-small order-restore-link" data-order-id="${escapeHtml(order.order_id)}">Restore</button>` : ""}
+        ${currentRole === "owner" && currentFilter !== "trash" ? `<button type="button" class="btn btn-ghost btn-small btn-danger order-delete-link" data-order-id="${escapeHtml(order.order_id)}">Delete</button>` : ""}
       </span>
     `;
     if (showInvoiceBtn) {
@@ -301,7 +318,11 @@ function renderOrders(orders) {
     }
     if (currentRole === "owner") {
       head.querySelector(".order-history-link").addEventListener("click", () => openActivityLogForOrder(order.order_id));
-      head.querySelector(".order-delete-link").addEventListener("click", () => deleteOrder(order.order_id, order.order_name));
+      if (currentFilter === "trash") {
+        head.querySelector(".order-restore-link").addEventListener("click", () => restoreOrder(order.order_id, order.order_name));
+      } else {
+        head.querySelector(".order-delete-link").addEventListener("click", () => deleteOrder(order.order_id, order.order_name));
+      }
     }
     card.appendChild(head);
 
@@ -619,6 +640,14 @@ invoiceFilterButtons.forEach((btn) => {
     currentInvoiceFilter = btn.dataset.invoice;
     renderOrders(filterByTrackQuery(lastLoadedOrders));
   });
+});
+
+trashBtn.addEventListener("click", () => {
+  currentFilter = "trash";
+  currentInvoiceFilter = "";
+  filterButtons.forEach((b) => b.classList.remove("active"));
+  invoiceFilterRow.hidden = true;
+  loadOrders();
 });
 
 // ---------------------------------------------------------------------------

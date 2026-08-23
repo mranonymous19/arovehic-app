@@ -171,6 +171,7 @@ def init_db():
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_amount NUMERIC;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS balance_due NUMERIC;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_type TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_at TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_number TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_date TEXT;
         """
@@ -884,10 +885,14 @@ def api_orders():
     if session.get("role") == "accounts":
         status_filter = "billing"
 
+    if status_filter == "trash" and session.get("role") != "owner":
+        return jsonify({"error": "Only the owner can view Trash"}), 403
+
     # created_at is stored as ISO-8601 text (as it comes from Shopify), so
     # cast it to a date for the range comparison rather than a string match.
     query = "SELECT * FROM orders WHERE 1=1"
     params = []
+    query += " AND deleted_at IS NOT NULL" if status_filter == "trash" else " AND deleted_at IS NULL"
     if date_from:
         # NULLIF guards against a blank/unparseable created_at (e.g. odd
         # sync data) throwing a cast error — it just won't match instead.
@@ -976,6 +981,8 @@ def api_orders():
             items = [i for i in items if i["status"] in ("purchased", "stock")]
             if not items:
                 continue
+        elif status_filter == "trash":
+            pass  # every deleted order shows as-is, items unfiltered
         elif status_filter:
             items = [i for i in items if i["status"] == status_filter]
             if not items:
@@ -998,6 +1005,7 @@ def api_orders():
                 "payment_type": payment_type,
                 "assigned_to": assigned_to,
                 "invoice_number": order["invoice_number"],
+                "deleted_at": order["deleted_at"],
                 "items": [dict(i) for i in items],
             }
         )
@@ -1087,26 +1095,50 @@ def api_order_invoice(order_id):
 def api_delete_order(order_id):
     db = get_db()
     cur = db.cursor()
-    cur.execute("SELECT order_name FROM orders WHERE shopify_order_id = %s", (order_id,))
+    cur.execute("SELECT order_name, deleted_at FROM orders WHERE shopify_order_id = %s", (order_id,))
     order = cur.fetchone()
     if not order:
         cur.close()
         return jsonify({"error": "Order not found"}), 404
+    if order["deleted_at"]:
+        cur.close()
+        return jsonify({"error": "Order is already in Trash"}), 400
 
-    # items has a FK to orders — delete items first.
-    cur.execute("DELETE FROM items WHERE shopify_order_id = %s", (order_id,))
-    items_deleted = cur.rowcount
-    cur.execute("DELETE FROM orders WHERE shopify_order_id = %s", (order_id,))
-
-    # activity_log rows aren't FK-linked, so history for this order is kept
-    # even after the order itself is gone — but log the deletion too.
+    # Soft delete: mark it deleted rather than removing the row, so it can
+    # be restored from Trash — items and history are left untouched.
+    now = datetime.now(timezone.utc).isoformat()
+    cur.execute("UPDATE orders SET deleted_at = %s WHERE shopify_order_id = %s", (now, order_id))
     log_activity(cur, None, order["order_name"] or order_id, "order_delete",
-                 f"{session['name']} deleted order {order['order_name'] or order_id} "
-                 f"({items_deleted} item(s))", order_id=order_id)
+                 f"{session['name']} moved order {order['order_name'] or order_id} to Trash",
+                 order_id=order_id)
 
     db.commit()
     cur.close()
-    return jsonify({"ok": True, "items_deleted": items_deleted})
+    return jsonify({"ok": True})
+
+
+@app.route("/api/orders/<order_id>/restore", methods=["POST"])
+@owner_required
+def api_restore_order(order_id):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT order_name, deleted_at FROM orders WHERE shopify_order_id = %s", (order_id,))
+    order = cur.fetchone()
+    if not order:
+        cur.close()
+        return jsonify({"error": "Order not found"}), 404
+    if not order["deleted_at"]:
+        cur.close()
+        return jsonify({"error": "Order isn't in Trash"}), 400
+
+    cur.execute("UPDATE orders SET deleted_at = NULL WHERE shopify_order_id = %s", (order_id,))
+    log_activity(cur, None, order["order_name"] or order_id, "order_restore",
+                 f"{session['name']} restored order {order['order_name'] or order_id} from Trash",
+                 order_id=order_id)
+
+    db.commit()
+    cur.close()
+    return jsonify({"ok": True})
 
 
 def order_assigned_to_user(cur, order_id, user_id):
