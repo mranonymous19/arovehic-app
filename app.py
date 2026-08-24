@@ -619,11 +619,25 @@ def api_sync():
     try:
         resp = requests.get(webhook_url, timeout=30)
         resp.raise_for_status()
-        payload = resp.json()
     except requests.exceptions.RequestException as exc:
         return jsonify({"error": f"Could not reach n8n webhook: {exc}"}), 502
+
+    try:
+        payload = resp.json()
     except ValueError:
-        return jsonify({"error": "n8n webhook did not return valid JSON."}), 502
+        # requests.Response.json() raises a JSONDecodeError that is ALSO a
+        # RequestException subclass — split into its own try/except so this
+        # doesn't get mislabeled as a connectivity failure above. A common
+        # cause: the n8n workflow's "Respond to Webhook" node returned a
+        # completely empty body (e.g. zero orders matched, with
+        # "allIncomingItems" mode) instead of valid JSON like `[]`.
+        body_preview = (resp.text or "")[:200]
+        return jsonify({
+            "error": "n8n webhook reached, but didn't return valid JSON "
+                     f"(got: {body_preview!r}). Check the Respond to Webhook "
+                     "node in n8n — it should always emit valid JSON, even "
+                     "an empty [] when there's nothing to sync."
+        }), 502
 
     # Expected payload shape (see README): a list of orders, each with a
     # list of line items. Adjust here if your n8n Code node outputs
