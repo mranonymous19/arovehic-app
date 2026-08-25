@@ -405,7 +405,7 @@ def build_invoice_pdf(order, items, invoice_number, invoice_date_str):
     header_top, header_bottom = draw_table_header(y)
     body_top = header_bottom
     ry = body_top
-    page_body_top = body_top  # top of the *current page's* portion, for its border
+    page_body_top = header_top  # top of the *current page's* portion, for its border
 
     # Build the full list of rows to draw: each line item, then the IGST
     # summary row, then the delivery row if any.
@@ -431,7 +431,7 @@ def build_invoice_pdf(order, items, invoice_number, invoice_date_str):
             new_top = page_h - margin
             header_top, header_bottom = draw_table_header(new_top)
             ry = header_bottom
-            page_body_top = ry
+            page_body_top = header_top
 
         if kind == "item":
             _text(c, col_x[0] + cols[0][1] / 2, ry - 12, str(idx), size=8, align="center")
