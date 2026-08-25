@@ -1088,9 +1088,21 @@ def api_order_invoice(order_id):
     order_dict = dict(order)
     cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
     order_dict["payment_type"] = resolve_payment_type(order_dict, cod_threshold) or "prepaid"
-    # order_dict["balance_due"] already carries through from `dict(order)` —
-    # invoice.py uses it (when set) instead of the full grand total for the
-    # "Amount to be Received" line on partially-paid COD orders.
+
+    # Shopify's balance_due reflects the order's original full total — it
+    # has no idea an item was later marked N/A (couldn't be sourced, not
+    # being delivered) here in the app. Subtract those items' value so
+    # "Amount to be Received" matches what's actually being handed to the
+    # customer, not what Shopify originally billed for.
+    na_items = [i for i in all_items if i["status"] == "na"]
+    if na_items and order_dict.get("balance_due") is not None:
+        na_value = 0.0
+        for i in na_items:
+            try:
+                na_value += float(i["price"] or 0) * (i["quantity"] or 0)
+            except (TypeError, ValueError):
+                pass
+        order_dict["balance_due"] = max(0.0, float(order_dict["balance_due"]) - na_value)
 
     pdf_buf = build_invoice_pdf(order_dict, [dict(i) for i in billing_items], invoice_number, invoice_date)
     filename = invoice_number.replace("/", "-") + ".pdf"
