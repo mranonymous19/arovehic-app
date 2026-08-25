@@ -351,7 +351,13 @@ def build_invoice_pdf(order, items, invoice_number, invoice_date_str):
 
     y = box_bottom
 
-    # ---- item table ---------------------------------------------------
+    # ---- item table (paginated) ---------------------------------------
+    # Previously this whole invoice was drawn on a single page with no
+    # overflow handling — with enough items, the table grew tall enough
+    # to push the Total row, Amount in Words, and Declaration/signature
+    # block below the bottom edge of the page, where they were silently
+    # invisible. This version tracks remaining space as it draws and
+    # starts a new page (repeating the column header) whenever needed.
     cols = [
         ("Sl\nNo.", 25),
         ("Description of Goods", 300),
@@ -363,69 +369,99 @@ def build_invoice_pdf(order, items, invoice_number, invoice_date_str):
     for _, w in cols:
         col_x.append(col_x[-1] + w)
 
+    PAGE_BOTTOM = 45  # keep this much clear space above the page edge
     HEADER_H = 24
-    header_top = y
-    header_bottom = header_top - HEADER_H
-    for i, (label, w) in enumerate(cols):
-        cx = col_x[i]
-        lines = label.split("\n")
-        if len(lines) == 1:
-            _text(c, cx + w / 2, header_bottom + 8, lines[0], font="Helvetica-Bold", size=8, align="center")
-        else:
-            _text(c, cx + w / 2, header_bottom + 14, lines[0], font="Helvetica-Bold", size=8, align="center")
-            _text(c, cx + w / 2, header_bottom + 4, lines[1], font="Helvetica-Bold", size=8, align="center")
-
-    # body rows: one per line item (height grows if the description wraps to
-    # 2 lines), then an IGST summary row, then a delivery row if any.
     BASE_ROW_H = 16
+    TOTAL_ROW_H = 22
+    WORDS_ROW_H = 34
+    DECL_H = 75
+    FOOTER_TAIL_H = 20  # "This is a Computer Generated Invoice" + spacing
+    TRAILER_H = TOTAL_ROW_H + WORDS_ROW_H + DECL_H + FOOTER_TAIL_H
+
     desc_wrap_cache = []
-    rows_height = 0
     for li in line_items:
-        wrapped = _wrap(li["desc"], "Helvetica-Bold", 8, cols[1][1] - 6)[:2]
-        desc_wrap_cache.append(wrapped)
-        row_h = BASE_ROW_H if len(wrapped) <= 1 else BASE_ROW_H + 9
-        rows_height += row_h
-    rows_height += BASE_ROW_H  # IGST row
-    if delivery_amount:
-        rows_height += BASE_ROW_H  # delivery row
+        desc_wrap_cache.append(_wrap(li["desc"], "Helvetica-Bold", 8, cols[1][1] - 6)[:2])
 
-    MIN_BODY_H = 230  # keep a tall table like the sample even for few items
-    body_h = max(rows_height, MIN_BODY_H)
+    def draw_table_header(top_y):
+        h_top = top_y
+        h_bottom = h_top - HEADER_H
+        for i, (label, w) in enumerate(cols):
+            cx = col_x[i]
+            lines = label.split("\n")
+            if len(lines) == 1:
+                _text(c, cx + w / 2, h_bottom + 8, lines[0], font="Helvetica-Bold", size=8, align="center")
+            else:
+                _text(c, cx + w / 2, h_bottom + 14, lines[0], font="Helvetica-Bold", size=8, align="center")
+                _text(c, cx + w / 2, h_bottom + 4, lines[1], font="Helvetica-Bold", size=8, align="center")
+        return h_top, h_bottom
+
+    def close_table_page(h_top, h_bottom, b_bottom):
+        # Border for whatever portion of the table landed on this page.
+        c.rect(x0, b_bottom, x1 - x0, h_top - b_bottom)
+        c.line(x0, h_bottom, x1, h_bottom)
+        for cx in col_x[1:-1]:
+            c.line(cx, b_bottom, cx, h_top)
+
+    header_top, header_bottom = draw_table_header(y)
     body_top = header_bottom
-    body_bottom = body_top - body_h
-
     ry = body_top
+    page_body_top = body_top  # top of the *current page's* portion, for its border
+
+    # Build the full list of rows to draw: each line item, then the IGST
+    # summary row, then the delivery row if any.
+    rows_to_draw = []
     for idx, li in enumerate(line_items, start=1):
         wrapped = desc_wrap_cache[idx - 1]
         row_h = BASE_ROW_H if len(wrapped) <= 1 else BASE_ROW_H + 9
-        _text(c, col_x[0] + cols[0][1] / 2, ry - 12, str(idx), size=8, align="center")
-        for wline_i, wline in enumerate(wrapped):
-            _text(c, col_x[1] + 3, ry - 12 - wline_i * 9, wline, font="Helvetica-Bold", size=8)
-        _text(c, col_x[2] + cols[2][1] - 4, ry - 12, f"{li['qty']} nos", size=8, align="right")
-        _text(c, col_x[3] + cols[3][1] - 4, ry - 12, fmt_amount(li["unit_rate_excl"]), size=8, align="right")
-        _text(c, col_x[4] + cols[4][1] - 4, ry - 12, fmt_amount(li["amount"]), font="Helvetica-Bold", size=8, align="right")
+        rows_to_draw.append(("item", idx, li, wrapped, row_h))
+    rows_to_draw.append(("igst", None, None, None, BASE_ROW_H))
+    if delivery_amount:
+        rows_to_draw.append(("delivery", None, None, None, BASE_ROW_H))
+
+    for row_i, (kind, idx, li, wrapped, row_h) in enumerate(rows_to_draw):
+        is_last_row = row_i == len(rows_to_draw) - 1
+        # Reserve room for the trailer only after the last table row, so
+        # earlier rows aren't forced to break early just because the
+        # trailer wouldn't fit on THIS page (it can start fresh on the
+        # next one instead).
+        needed = row_h + (TRAILER_H if is_last_row else 0)
+        if ry - needed < PAGE_BOTTOM:
+            close_table_page(page_body_top, header_bottom, ry)
+            c.showPage()
+            new_top = page_h - margin
+            header_top, header_bottom = draw_table_header(new_top)
+            ry = header_bottom
+            page_body_top = ry
+
+        if kind == "item":
+            _text(c, col_x[0] + cols[0][1] / 2, ry - 12, str(idx), size=8, align="center")
+            for wline_i, wline in enumerate(wrapped):
+                _text(c, col_x[1] + 3, ry - 12 - wline_i * 9, wline, font="Helvetica-Bold", size=8)
+            _text(c, col_x[2] + cols[2][1] - 4, ry - 12, f"{li['qty']} nos", size=8, align="right")
+            _text(c, col_x[3] + cols[3][1] - 4, ry - 12, fmt_amount(li["unit_rate_excl"]), size=8, align="right")
+            _text(c, col_x[4] + cols[4][1] - 4, ry - 12, fmt_amount(li["amount"]), font="Helvetica-Bold", size=8, align="right")
+        elif kind == "igst":
+            _text(c, col_x[1] + 3, ry - 12, f"Output Igst {int(GST_RATE*100)}%", font="Helvetica-Oblique", size=8)
+            _text(c, col_x[4] + cols[4][1] - 4, ry - 12, fmt_amount(igst_amount), font="Helvetica-Bold", size=8, align="right")
+        elif kind == "delivery":
+            _text(c, col_x[1] + 3, ry - 12, "DELIVERY CHARGE", font="Helvetica-Oblique", size=8)
+            _text(c, col_x[4] + cols[4][1] - 4, ry - 12, fmt_amount(delivery_amount), font="Helvetica-Bold", size=8, align="right")
+
         ry -= row_h
 
-    # GST/IGST is applied once here, on the invoice total — not per item.
-    # The rate is stated in the description text itself, so no separate
-    # GST-rate column is needed.
-    _text(c, col_x[1] + 3, ry - 12, f"Output Igst {int(GST_RATE*100)}%", font="Helvetica-Oblique", size=8)
-    _text(c, col_x[4] + cols[4][1] - 4, ry - 12, fmt_amount(igst_amount), font="Helvetica-Bold", size=8, align="right")
-    ry -= BASE_ROW_H
+    # Pad the last page's table out to the same minimum height the
+    # original single-page layout used, so a short invoice still looks
+    # like a full table rather than a sliver — but only if there's
+    # comfortably enough room left for the trailer afterward.
+    MIN_BODY_H = 230
+    body_bottom = ry
+    padded_bottom = page_body_top - MIN_BODY_H
+    if padded_bottom < body_bottom and padded_bottom - TRAILER_H >= PAGE_BOTTOM:
+        body_bottom = padded_bottom
 
-    if delivery_amount:
-        _text(c, col_x[1] + 3, ry - 12, "DELIVERY CHARGE", font="Helvetica-Oblique", size=8)
-        _text(c, col_x[4] + cols[4][1] - 4, ry - 12, fmt_amount(delivery_amount), font="Helvetica-Bold", size=8, align="right")
-        ry -= BASE_ROW_H
-
-    # table borders: outer rect (header+body), column separators, header/body divider
-    c.rect(x0, body_bottom, x1 - x0, header_top - body_bottom)
-    c.line(x0, header_bottom, x1, header_bottom)
-    for cx in col_x[1:-1]:
-        c.line(cx, body_bottom, cx, header_top)
+    close_table_page(page_body_top, header_bottom, body_bottom)
 
     # total row
-    TOTAL_ROW_H = 22
     total_top = body_bottom
     total_bottom = total_top - TOTAL_ROW_H
     c.rect(x0, total_bottom, x1 - x0, TOTAL_ROW_H)
@@ -438,7 +474,6 @@ def build_invoice_pdf(order, items, invoice_number, invoice_date_str):
     y = total_bottom
 
     # ---- amount in words row ----
-    WORDS_ROW_H = 34
     words_bottom = y - WORDS_ROW_H
     c.rect(x0, words_bottom, x1 - x0, WORDS_ROW_H)
     _text(c, x0 + 4, y - 11, "Amount Chargeable (in words)", font="Helvetica", size=8)
@@ -447,7 +482,6 @@ def build_invoice_pdf(order, items, invoice_number, invoice_date_str):
     y = words_bottom
 
     # ---- declaration / signatory row ----
-    DECL_H = 75
     decl_bottom = y - DECL_H
     c.rect(x0, decl_bottom, x1 - x0, DECL_H)
     decl_split = x0 + 320
