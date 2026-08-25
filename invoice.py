@@ -336,7 +336,15 @@ def build_invoice_pdf(order, items, invoice_number, invoice_date_str):
         cod_threshold = float(order.get("cod_shipping_threshold") or 140)
         payment_type = "cod" if delivery_amount >= cod_threshold else "prepaid"
     if payment_type == "cod":
-        payment_text = f"Rs. {fmt_amount(grand_total)} Amount to be Received"
+        # balance_due is Shopify's actual outstanding amount, synced per
+        # order — this is what's really left to collect on delivery. Some
+        # orders are only *partially* COD (an advance already paid online,
+        # e.g. "Partial Cash On Delivery" shipping), so this can be less
+        # than the invoice's own grand_total. Falls back to grand_total
+        # when balance_due wasn't synced (e.g. a manually-pasted order).
+        balance_due = order.get("balance_due")
+        amount_to_collect = float(balance_due) if balance_due not in (None, "") else grand_total
+        payment_text = f"Rs. {fmt_amount(amount_to_collect)} Amount to be Received"
     else:
         payment_text = "Amount is Received"
     _text(c, x_mid + 4, terms_top - 25, payment_text, font="Helvetica-Bold", size=9)

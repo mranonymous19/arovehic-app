@@ -169,6 +169,9 @@ def init_db():
         ALTER TABLE items ADD COLUMN IF NOT EXISTS packed_at TEXT;
         ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS order_id TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_amount NUMERIC;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS balance_due NUMERIC;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_type TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_at TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_number TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_date TEXT;
         """
@@ -236,79 +239,11 @@ def log_activity(cur, item_id, item_name, action, details="", order_id=None):
 
 
 # ---------------------------------------------------------------------------
-# Manual "paste an order" parsing
-#
-# Expected shape — 4 blocks separated by a blank line each, matching what
-# gets copy-pasted straight off a courier/shipping label:
-#
-#   99274755211786194813416          <- Order ID / AWB (digits, or "BLR 101" style)
-#
-#   SHAMSHUL TABREZ                  <- Customer name
-#   132 A First Floor ... Rajasthan  <- Address (1+ lines)
-#   301707                           <- Pincode (a standalone 5-7 digit line)
-#   Mob: 9927475521                  <- Phone
-#
-#   HERO SUPER SPLENDOR              <- Vendor/vehicle (optional)
-#   Seat Lock Bracket                <- Item title
-#
-#   88 + 60 Received                 <- Purchase amount (first number); the
-#                                        rest (e.g. "+ 60" delivery charge) is
-#                                        informational only and isn't stored.
-#
-# Multiple orders can be pasted back to back — each is just another group
-# of 4 blocks, so the whole paste's block count must be a multiple of 4.
+# Manual order entry — see api_add_manual_order below. Telecallers fill in
+# a structured form (order id, customer, address fields, payment type,
+# delivery charge, and a repeatable list of items) instead of typing text
+# in a specific shape, so there's no format for them to get wrong.
 # ---------------------------------------------------------------------------
-
-def _parse_pasted_order(block_group):
-    """block_group: a list of exactly 4 text blocks (order id, customer,
-    item, amount). Returns a dict of parsed fields, or raises ValueError
-    with a human-readable message about what looked wrong."""
-    order_block, customer_block, item_block, amount_block = block_group
-
-    raw_order_id = order_block.strip().splitlines()[0].strip() if order_block.strip() else ""
-    if not raw_order_id:
-        raise ValueError("a block is missing its Order ID")
-
-    customer_lines = [l.strip() for l in customer_block.splitlines() if l.strip()]
-    if not customer_lines:
-        raise ValueError(f"Order {raw_order_id}: missing customer/address block")
-    customer_name = customer_lines[0]
-    phone = ""
-    pincode = ""
-    address_lines = []
-    for line in customer_lines[1:]:
-        mob_match = re.match(r"(?i)^mob(?:ile)?[:\s]+(.+)$", line)
-        if mob_match:
-            phone = re.sub(r"\D", "", mob_match.group(1))
-            continue
-        if re.fullmatch(r"\d{5,7}", line):
-            pincode = line
-            continue
-        address_lines.append(line)
-    address = " ".join(address_lines)
-
-    item_lines = [l.strip() for l in item_block.splitlines() if l.strip()]
-    if not item_lines:
-        raise ValueError(f"Order {raw_order_id}: missing item block")
-    if len(item_lines) == 1:
-        vendor, title = "", item_lines[0]
-    else:
-        vendor, title = " ".join(item_lines[:-1]), item_lines[-1]
-
-    m = re.search(r"[\d,]+(?:\.\d+)?", amount_block.strip())
-    purchase_amount = float(m.group().replace(",", "")) if m else 0.0
-
-    return {
-        "raw_order_id": raw_order_id,
-        "customer_name": customer_name,
-        "phone": phone,
-        "pincode": pincode,
-        "address": address,
-        "vendor": vendor,
-        "title": title,
-        "purchase_amount": purchase_amount,
-    }
-
 
 # ---------------------------------------------------------------------------
 # Auth helpers
@@ -317,7 +252,8 @@ def _parse_pasted_order(block_group):
 #   owner      - full control: sync, settings, status updates, manage users.
 #   staff      - can update item status only; only sees orders currently
 #                assigned to them (see /api/orders below).
-#   telecaller - view-only: can see orders and items, nothing else.
+#   telecaller - view-only for orders/items, plus can add manual orders
+#                (they're the ones taking these calls).
 #   packer     - can toggle the packed flag only.
 #   accounts   - view-only, restricted to the Billing view: which orders
 #                are ready to invoice and whether each has been printed yet.
@@ -368,6 +304,17 @@ def staff_or_owner_required(f):
     def wrapper(*args, **kwargs):
         if session.get("role") not in ("owner", "staff"):
             return jsonify({"error": "Telecaller accounts are view-only"}), 403
+        return f(*args, **kwargs)
+
+    return wrapper
+
+
+def telecaller_or_owner_required(f):
+    @wraps(f)
+    @login_required
+    def wrapper(*args, **kwargs):
+        if session.get("role") not in ("owner", "telecaller"):
+            return jsonify({"error": "Only telecallers and the owner can add orders"}), 403
         return f(*args, **kwargs)
 
     return wrapper
@@ -670,13 +617,27 @@ def api_sync():
         return jsonify({"error": "No n8n webhook URL configured. Set it in Settings first."}), 400
 
     try:
-        resp = requests.get(webhook_url, timeout=30)
+        resp = requests.get(webhook_url, timeout=180)
         resp.raise_for_status()
-        payload = resp.json()
     except requests.exceptions.RequestException as exc:
         return jsonify({"error": f"Could not reach n8n webhook: {exc}"}), 502
+
+    try:
+        payload = resp.json()
     except ValueError:
-        return jsonify({"error": "n8n webhook did not return valid JSON."}), 502
+        # requests.Response.json() raises a JSONDecodeError that is ALSO a
+        # RequestException subclass — split into its own try/except so this
+        # doesn't get mislabeled as a connectivity failure above. A common
+        # cause: the n8n workflow's "Respond to Webhook" node returned a
+        # completely empty body (e.g. zero orders matched, with
+        # "allIncomingItems" mode) instead of valid JSON like `[]`.
+        body_preview = (resp.text or "")[:200]
+        return jsonify({
+            "error": "n8n webhook reached, but didn't return valid JSON "
+                     f"(got: {body_preview!r}). Check the Respond to Webhook "
+                     "node in n8n — it should always emit valid JSON, even "
+                     "an empty [] when there's nothing to sync."
+        }), 502
 
     # Expected payload shape (see README): a list of orders, each with a
     # list of line items. Adjust here if your n8n Code node outputs
@@ -719,12 +680,23 @@ def api_sync():
         except (TypeError, ValueError):
             shipping_amount = None
 
+        # Outstanding balance on the order (Shopify's total_outstanding) —
+        # used on COD invoices so "Amount to be Received" reflects what's
+        # actually still owed on a partially-paid order, not the full
+        # order total. None when not synced, e.g. a manually-pasted order —
+        # the invoice falls back to the full grand total in that case.
+        balance_due_raw = order.get("balance_due")
+        try:
+            balance_due = float(balance_due_raw) if balance_due_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            balance_due = None
+
         cur.execute(
             "INSERT INTO orders (shopify_order_id, order_name, customer_name, "
             "shipping_address, shipping_address1, shipping_address2, shipping_city, "
             "shipping_state, shipping_pincode, customer_phone, shipping_amount, "
-            "created_at, synced_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "balance_due, created_at, synced_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (shopify_order_id) DO UPDATE SET "
             "order_name = EXCLUDED.order_name, customer_name = EXCLUDED.customer_name, "
             "shipping_address = EXCLUDED.shipping_address, "
@@ -735,9 +707,10 @@ def api_sync():
             "shipping_pincode = EXCLUDED.shipping_pincode, "
             "customer_phone = EXCLUDED.customer_phone, "
             "shipping_amount = EXCLUDED.shipping_amount, "
+            "balance_due = EXCLUDED.balance_due, "
             "created_at = EXCLUDED.created_at, synced_at = EXCLUDED.synced_at",
             (order_id, order_name, customer_name, full_address, address1, address2,
-             city, state, pincode, customer_phone, shipping_amount, created_at, now),
+             city, state, pincode, customer_phone, shipping_amount, balance_due, created_at, now),
         )
         order_count += 1
 
@@ -774,80 +747,142 @@ def api_sync():
     return jsonify({"ok": True, "orders_synced": order_count, "items_synced": item_count})
 
 
-@app.route("/api/orders/paste", methods=["POST"])
-@owner_required
-def api_paste_order():
+@app.route("/api/orders/manual", methods=["POST"])
+@telecaller_or_owner_required
+def api_add_manual_order():
     data = request.get_json(force=True) or {}
-    text = (data.get("text") or "").strip()
-    if not text:
-        return jsonify({"error": "Paste some order text first"}), 400
 
-    # Split on blank-line gaps into blocks, then take them 4 at a time:
-    # Order ID / Customer details / Item / Amount. Multiple orders can be
-    # pasted back-to-back, each as its own group of 4 blocks.
-    blocks = [b for b in re.split(r"\n\s*\n", text) if b.strip()]
-    if len(blocks) % 4 != 0:
-        return jsonify({
-            "error": f"Found {len(blocks)} text block(s) separated by blank lines, but every "
-                     "order needs exactly 4 (Order ID, Customer details, Item, Amount). "
-                     "Check for a missing or extra blank line."
-        }), 400
+    raw_order_id = (data.get("order_id") or "").strip()
+    customer_name = (data.get("customer_name") or "").strip()
+    phone = re.sub(r"\D", "", data.get("phone") or "")
+    address1 = (data.get("address1") or "").strip()
+    address2 = (data.get("address2") or "").strip()
+    city = (data.get("city") or "").strip()
+    state = (data.get("state") or "").strip()
+    pincode = (data.get("pincode") or "").strip()
+    payment_type = data.get("payment_type")
+    items_in = data.get("items") or []
+
+    errors = []
+    if not raw_order_id:
+        errors.append("Order ID is required")
+    if not customer_name:
+        errors.append("Customer name is required")
+    if not address1:
+        errors.append("Address is required")
+    if not city:
+        errors.append("City is required")
+    if not state:
+        errors.append("State is required")
+    if not pincode:
+        errors.append("Pincode is required")
+    if payment_type not in ("cod", "prepaid"):
+        errors.append("Payment type must be COD or Prepaid")
+
+    def _num(value, field, allow_none=False):
+        if value in (None, ""):
+            if allow_none:
+                return None
+            return 0.0
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            errors.append(f"{field} must be a number")
+            return 0.0
+
+    shipping_amount = _num(data.get("shipping_amount"), "Delivery charge")
+    balance_due = _num(data.get("balance_due"), "Cash to be collected", allow_none=True)
+    if balance_due is not None and balance_due < 0:
+        errors.append("Cash to be collected can't be negative")
+    if shipping_amount < 0:
+        errors.append("Delivery charge can't be negative")
+
+    parsed_items = []
+    for idx, raw_item in enumerate(items_in, start=1):
+        title = (raw_item.get("title") or "").strip()
+        vendor = (raw_item.get("vendor") or "").strip()
+        if not title:
+            continue  # a fully-blank item row (e.g. added then not filled in) is just skipped
+        try:
+            quantity = int(raw_item.get("quantity") or 1)
+        except (TypeError, ValueError):
+            errors.append(f"Item {idx}: quantity must be a whole number")
+            quantity = 1
+        if quantity < 1:
+            errors.append(f"Item {idx}: quantity must be at least 1")
+            quantity = 1
+        try:
+            price = float(raw_item.get("price") or 0)
+        except (TypeError, ValueError):
+            errors.append(f"Item {idx}: price must be a number")
+            price = 0.0
+        if price < 0:
+            errors.append(f"Item {idx}: price can't be negative")
+        parsed_items.append({"title": title, "vendor": vendor, "quantity": quantity, "price": price})
+
+    if not parsed_items:
+        errors.append("At least one item is required")
+
+    if errors:
+        return jsonify({"error": "; ".join(errors)}), 400
+
+    order_id = "manual-" + re.sub(r"\s+", "-", raw_order_id).lower()
+    full_address = ", ".join(p for p in [address1, address2, city, state, pincode] if p)
 
     db = get_db()
     cur = db.cursor()
     now = datetime.now(timezone.utc).isoformat()
-    orders_touched = set()
-    items_added = 0
-    errors = []
 
-    for i in range(0, len(blocks), 4):
-        try:
-            parsed = _parse_pasted_order(blocks[i:i + 4])
-        except ValueError as e:
-            errors.append(str(e))
-            continue
+    cur.execute("SELECT shopify_order_id FROM orders WHERE shopify_order_id = %s", (order_id,))
+    if cur.fetchone():
+        cur.close()
+        return jsonify({"error": f"Order {raw_order_id} already exists"}), 400
 
-        # Prefix manually-entered order ids so they can never collide with
-        # a real numeric Shopify order id synced later.
-        order_id = "manual-" + re.sub(r"\s+", "-", parsed["raw_order_id"]).lower()
+    cur.execute(
+        "INSERT INTO orders (shopify_order_id, order_name, customer_name, customer_phone, "
+        "shipping_address, shipping_address1, shipping_address2, shipping_city, shipping_state, "
+        "shipping_pincode, shipping_amount, balance_due, payment_type, created_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (order_id, raw_order_id, customer_name, phone, full_address, address1, address2, city,
+         state, pincode, shipping_amount, balance_due, payment_type, now),
+    )
 
-        cur.execute("SELECT shopify_order_id FROM orders WHERE shopify_order_id = %s", (order_id,))
-        if not cur.fetchone():
-            cur.execute(
-                "INSERT INTO orders (shopify_order_id, order_name, customer_name, customer_phone, "
-                "shipping_address, shipping_pincode, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (order_id, parsed["raw_order_id"], parsed["customer_name"], parsed["phone"],
-                 parsed["address"], parsed["pincode"], now),
-            )
-
+    for item in parsed_items:
         item_id = f"{order_id}-item-{uuid.uuid4().hex[:8]}"
         cur.execute(
             "INSERT INTO items (id, shopify_order_id, title, variant_title, quantity, price, "
-            "vendor, status, purchase_amount, updated_at) "
-            "VALUES (%s, %s, %s, '', 1, '', %s, 'pending', %s, %s)",
-            (item_id, order_id, parsed["title"], parsed["vendor"], parsed["purchase_amount"], now),
+            "vendor, status, updated_at) "
+            "VALUES (%s, %s, %s, '', %s, %s, %s, 'pending', %s)",
+            (item_id, order_id, item["title"], item["quantity"], str(item["price"]), item["vendor"], now),
         )
-        log_activity(cur, item_id, parsed["title"], "manual_add",
-                     f"{session['name']} added this item by pasting order details",
+        log_activity(cur, item_id, item["title"], "manual_add",
+                     f"{session['name']} added this item manually",
                      order_id=order_id)
-        orders_touched.add(order_id)
-        items_added += 1
 
     db.commit()
     cur.close()
-
-    if items_added == 0:
-        return jsonify({"error": "Could not parse any orders — " + "; ".join(errors)}), 400
-
-    result = {"ok": True, "orders_touched": len(orders_touched), "items_added": items_added}
-    if errors:
-        result["warnings"] = errors
-    return jsonify(result)
+    return jsonify({"ok": True, "order_id": order_id, "items_added": len(parsed_items)})
 
 
 # ---------------------------------------------------------------------------
 # Routes - orders / items
 # ---------------------------------------------------------------------------
+
+def resolve_payment_type(order_row, cod_threshold):
+    """COD vs Prepaid for one order. An explicit orders.payment_type (set
+    when a telecaller enters the order manually — they know this directly,
+    no need to infer it) always wins. Otherwise, for Shopify-synced orders,
+    it's derived from the shipping charge against the threshold in
+    Settings -> Schedule, same as before — so changing that threshold still
+    applies retroactively to every synced order, past and future."""
+    explicit = order_row.get("payment_type") if hasattr(order_row, "get") else order_row["payment_type"]
+    if explicit in ("cod", "prepaid"):
+        return explicit
+    shipping_amount = order_row["shipping_amount"]
+    if shipping_amount is None:
+        return None
+    return "cod" if float(shipping_amount) >= cod_threshold else "prepaid"
+
 
 @app.route("/api/orders", methods=["GET"])
 @login_required
@@ -864,10 +899,14 @@ def api_orders():
     if session.get("role") == "accounts":
         status_filter = "billing"
 
+    if status_filter == "trash" and session.get("role") != "owner":
+        return jsonify({"error": "Only the owner can view Trash"}), 403
+
     # created_at is stored as ISO-8601 text (as it comes from Shopify), so
     # cast it to a date for the range comparison rather than a string match.
     query = "SELECT * FROM orders WHERE 1=1"
     params = []
+    query += " AND deleted_at IS NOT NULL" if status_filter == "trash" else " AND deleted_at IS NULL"
     if date_from:
         # NULLIF guards against a blank/unparseable created_at (e.g. odd
         # sync data) throwing a cast error — it just won't match instead.
@@ -919,15 +958,16 @@ def api_orders():
         closed = bool(items) and all(i["status"] != "pending" for i in items)
 
         shipping_amount = order["shipping_amount"]
-        if shipping_amount is None:
-            # No shipping charge synced (e.g. a manually-pasted order) —
-            # payment type can't be derived, so leave it unset rather than
-            # guessing.
+        if shipping_amount is None and order.get("payment_type") not in ("cod", "prepaid"):
+            # No shipping charge synced and no explicit payment type set
+            # (e.g. an old manually-pasted order from before this field
+            # existed) — payment type can't be determined, so leave it
+            # unset rather than guessing.
             payment_type = None
             assigned_staff_id = None
             assigned_to = None
         else:
-            payment_type = "cod" if float(shipping_amount) >= cod_threshold else "prepaid"
+            payment_type = resolve_payment_type(order, cod_threshold)
             assigned_staff_id = cod_staff_id if payment_type == "cod" else prepaid_staff_id
             assigned_to = staff_names.get(str(assigned_staff_id)) if assigned_staff_id else None
 
@@ -955,6 +995,8 @@ def api_orders():
             items = [i for i in items if i["status"] in ("purchased", "stock")]
             if not items:
                 continue
+        elif status_filter == "trash":
+            pass  # every deleted order shows as-is, items unfiltered
         elif status_filter:
             items = [i for i in items if i["status"] == status_filter]
             if not items:
@@ -977,6 +1019,7 @@ def api_orders():
                 "payment_type": payment_type,
                 "assigned_to": assigned_to,
                 "invoice_number": order["invoice_number"],
+                "deleted_at": order["deleted_at"],
                 "items": [dict(i) for i in items],
             }
         )
@@ -1039,15 +1082,15 @@ def api_order_invoice(order_id):
 
     cur.close()
 
-    # Same COD/Prepaid rule used by /api/orders — derived from the shipping
-    # charge against the threshold in Settings -> Schedule, not stored per
-    # order, so it always reflects the current threshold.
+    # Same COD/Prepaid rule used by /api/orders — an explicit payment_type
+    # (manually-entered orders) wins, otherwise derived from the shipping
+    # charge against the threshold in Settings -> Schedule.
     order_dict = dict(order)
     cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
-    shipping_amount = order_dict.get("shipping_amount")
-    order_dict["payment_type"] = (
-        "cod" if shipping_amount is not None and float(shipping_amount) >= cod_threshold else "prepaid"
-    )
+    order_dict["payment_type"] = resolve_payment_type(order_dict, cod_threshold) or "prepaid"
+    # order_dict["balance_due"] already carries through from `dict(order)` —
+    # invoice.py uses it (when set) instead of the full grand total for the
+    # "Amount to be Received" line on partially-paid COD orders.
 
     pdf_buf = build_invoice_pdf(order_dict, [dict(i) for i in billing_items], invoice_number, invoice_date)
     filename = invoice_number.replace("/", "-") + ".pdf"
@@ -1061,6 +1104,57 @@ def api_order_invoice(order_id):
     return response
 
 
+@app.route("/api/orders/<order_id>", methods=["DELETE"])
+@owner_required
+def api_delete_order(order_id):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT order_name, deleted_at FROM orders WHERE shopify_order_id = %s", (order_id,))
+    order = cur.fetchone()
+    if not order:
+        cur.close()
+        return jsonify({"error": "Order not found"}), 404
+    if order["deleted_at"]:
+        cur.close()
+        return jsonify({"error": "Order is already in Trash"}), 400
+
+    # Soft delete: mark it deleted rather than removing the row, so it can
+    # be restored from Trash — items and history are left untouched.
+    now = datetime.now(timezone.utc).isoformat()
+    cur.execute("UPDATE orders SET deleted_at = %s WHERE shopify_order_id = %s", (now, order_id))
+    log_activity(cur, None, order["order_name"] or order_id, "order_delete",
+                 f"{session['name']} moved order {order['order_name'] or order_id} to Trash",
+                 order_id=order_id)
+
+    db.commit()
+    cur.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/orders/<order_id>/restore", methods=["POST"])
+@owner_required
+def api_restore_order(order_id):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT order_name, deleted_at FROM orders WHERE shopify_order_id = %s", (order_id,))
+    order = cur.fetchone()
+    if not order:
+        cur.close()
+        return jsonify({"error": "Order not found"}), 404
+    if not order["deleted_at"]:
+        cur.close()
+        return jsonify({"error": "Order isn't in Trash"}), 400
+
+    cur.execute("UPDATE orders SET deleted_at = NULL WHERE shopify_order_id = %s", (order_id,))
+    log_activity(cur, None, order["order_name"] or order_id, "order_restore",
+                 f"{session['name']} restored order {order['order_name'] or order_id} from Trash",
+                 order_id=order_id)
+
+    db.commit()
+    cur.close()
+    return jsonify({"ok": True})
+
+
 def order_assigned_to_user(cur, order_id, user_id):
     """True if `order_id`'s current COD/Prepaid duty staff is `user_id`.
 
@@ -1068,12 +1162,14 @@ def order_assigned_to_user(cur, order_id, user_id):
     account from editing items on an order that isn't (or is no longer)
     assigned to them, even via a direct API call.
     """
-    cur.execute("SELECT shipping_amount FROM orders WHERE shopify_order_id = %s", (order_id,))
+    cur.execute("SELECT shipping_amount, payment_type FROM orders WHERE shopify_order_id = %s", (order_id,))
     order = cur.fetchone()
-    if not order or order["shipping_amount"] is None:
+    if not order:
         return False
     cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
-    payment_type = "cod" if float(order["shipping_amount"]) >= cod_threshold else "prepaid"
+    payment_type = resolve_payment_type(order, cod_threshold)
+    if payment_type is None:
+        return False
     assigned_staff_id = get_setting("cod_staff_id" if payment_type == "cod" else "prepaid_staff_id", "")
     return bool(assigned_staff_id) and str(assigned_staff_id) == str(user_id)
 

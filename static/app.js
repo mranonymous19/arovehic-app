@@ -48,10 +48,23 @@ const saveScheduleBtn = document.getElementById("saveScheduleBtn");
 
 const pasteOrderBtn = document.getElementById("pasteOrderBtn");
 const pasteOrderModal = document.getElementById("pasteOrderModal");
-const pasteOrderText = document.getElementById("pasteOrderText");
 const pasteOrderError = document.getElementById("pasteOrderError");
 const submitPasteOrderBtn = document.getElementById("submitPasteOrderBtn");
 const closePasteOrderBtn = document.getElementById("closePasteOrderBtn");
+const moOrderId = document.getElementById("moOrderId");
+const moCustomerName = document.getElementById("moCustomerName");
+const moPhone = document.getElementById("moPhone");
+const moPaymentType = document.getElementById("moPaymentType");
+const moAddress1 = document.getElementById("moAddress1");
+const moAddress2 = document.getElementById("moAddress2");
+const moCity = document.getElementById("moCity");
+const moState = document.getElementById("moState");
+const moPincode = document.getElementById("moPincode");
+const moShippingAmount = document.getElementById("moShippingAmount");
+const moBalanceDue = document.getElementById("moBalanceDue");
+const moItemsList = document.getElementById("moItemsList");
+const moAddItemBtn = document.getElementById("moAddItemBtn");
+const moTotalDisplay = document.getElementById("moTotalDisplay");
 
 const userBadge = document.getElementById("userBadge");
 const accountBtn = document.getElementById("accountBtn");
@@ -65,6 +78,7 @@ const savePasswordBtn = document.getElementById("savePasswordBtn");
 const closeAccountBtn = document.getElementById("closeAccountBtn");
 
 const usersBtn = document.getElementById("usersBtn");
+const trashBtn = document.getElementById("trashBtn");
 const usersModal = document.getElementById("usersModal");
 const usersTableBody = document.getElementById("usersTableBody");
 const newUserName = document.getElementById("newUserName");
@@ -104,10 +118,11 @@ async function loadMe() {
 
   const isOwner = currentRole === "owner";
   syncBtn.hidden = !isOwner;
-  pasteOrderBtn.hidden = !isOwner;
+  pasteOrderBtn.hidden = !(isOwner || currentRole === "telecaller");
   settingsBtn.hidden = !isOwner;
   usersBtn.hidden = !isOwner;
   activityLogBtn.hidden = !isOwner;
+  trashBtn.hidden = !isOwner;
 
   if (currentRole === "accounts") {
     // Accounts only ever needs the Billing view (what's ready to invoice,
@@ -123,10 +138,12 @@ async function loadMe() {
 }
 
 function canEditStatus() {
+  if (currentFilter === "trash") return false;
   return currentRole === "owner" || currentRole === "staff";
 }
 
 function canTogglePacked() {
+  if (currentFilter === "trash") return false;
   return currentRole === "owner" || currentRole === "packer";
 }
 
@@ -175,6 +192,32 @@ orderTrackInput.addEventListener("input", () => {
     renderOrders(filterByTrackQuery(lastLoadedOrders));
   }, 200);
 });
+
+async function deleteOrder(orderId, orderName) {
+  const ok = confirm(`Move order ${orderName || orderId} to Trash? You can restore it later from Trash if needed.`);
+  if (!ok) return;
+  const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}`, { method: "DELETE" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    showMessage(data.error || "Could not delete the order.", true);
+    return;
+  }
+  lastLoadedOrders = lastLoadedOrders.filter((o) => o.order_id !== orderId);
+  renderOrders(filterByTrackQuery(lastLoadedOrders));
+  showMessage(`Moved ${orderName || orderId} to Trash.`);
+}
+
+async function restoreOrder(orderId, orderName) {
+  const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/restore`, { method: "POST" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    showMessage(data.error || "Could not restore the order.", true);
+    return;
+  }
+  lastLoadedOrders = lastLoadedOrders.filter((o) => o.order_id !== orderId);
+  renderOrders(filterByTrackQuery(lastLoadedOrders));
+  showMessage(`Restored ${orderName || orderId}.`);
+}
 
 async function printInvoice(orderId, buttonEl) {
   // Open the tab synchronously, inside the click handler, so browsers don't
@@ -229,7 +272,7 @@ function renderOrders(orders) {
     ordersContainer.innerHTML = `
       <div class="empty-state">
         <div class="glyph">— empty manifest —</div>
-        <p>No orders yet.${currentRole === "owner" ? " Set your n8n webhook in Settings, then hit Sync from Shopify." : " Ask an owner to sync from Shopify."}</p>
+        <p>${currentFilter === "trash" ? "Trash is empty." : `No orders yet.${currentRole === "owner" ? " Set your n8n webhook in Settings, then hit Sync from Shopify." : " Ask an owner to sync from Shopify."}`}</p>
       </div>`;
     return;
   }
@@ -264,6 +307,8 @@ function renderOrders(orders) {
       <span class="order-head-actions">
         ${showInvoiceBtn ? `<button type="button" class="btn btn-ghost btn-small order-invoice-link" data-order-id="${escapeHtml(order.order_id)}">${order.invoice_number ? "Reprint Invoice" : "Print Invoice"}</button>` : ""}
         ${currentRole === "owner" ? `<button type="button" class="order-history-link" data-order-id="${escapeHtml(order.order_id)}">History</button>` : ""}
+        ${currentRole === "owner" && currentFilter === "trash" ? `<button type="button" class="btn btn-primary btn-small order-restore-link" data-order-id="${escapeHtml(order.order_id)}">Restore</button>` : ""}
+        ${currentRole === "owner" && currentFilter !== "trash" ? `<button type="button" class="btn btn-ghost btn-small btn-danger order-delete-link" data-order-id="${escapeHtml(order.order_id)}">Delete</button>` : ""}
       </span>
     `;
     if (showInvoiceBtn) {
@@ -273,6 +318,11 @@ function renderOrders(orders) {
     }
     if (currentRole === "owner") {
       head.querySelector(".order-history-link").addEventListener("click", () => openActivityLogForOrder(order.order_id));
+      if (currentFilter === "trash") {
+        head.querySelector(".order-restore-link").addEventListener("click", () => restoreOrder(order.order_id, order.order_name));
+      } else {
+        head.querySelector(".order-delete-link").addEventListener("click", () => deleteOrder(order.order_id, order.order_name));
+      }
     }
     card.appendChild(head);
 
@@ -425,9 +475,79 @@ syncBtn.addEventListener("click", async () => {
   }
 });
 
+// Same state list as invoice.py's GST_STATE_CODES, so every manually
+// entered order always resolves to a valid GST state code on the invoice.
+const INDIA_STATES = [
+  "Andaman and Nicobar Islands", "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar",
+  "Chandigarh", "Chhattisgarh", "Dadra and Nagar Haveli and Daman and Diu", "Delhi", "Goa",
+  "Gujarat", "Haryana", "Himachal Pradesh", "Jammu and Kashmir", "Jharkhand", "Karnataka",
+  "Kerala", "Ladakh", "Lakshadweep", "Madhya Pradesh", "Maharashtra", "Manipur", "Meghalaya",
+  "Mizoram", "Nagaland", "Odisha", "Puducherry", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu",
+  "Telangana", "Tripura", "Uttar Pradesh", "Uttarakhand", "West Bengal",
+];
+moState.innerHTML = `<option value="">Select…</option>` +
+  INDIA_STATES.map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+
+let moItemRowCount = 0;
+
+function moAddItemRow(prefill) {
+  const rowId = `mo-item-${moItemRowCount++}`;
+  const row = document.createElement("div");
+  row.className = "mo-item-row";
+  row.dataset.rowId = rowId;
+  row.innerHTML = `
+    <input type="text" class="mo-item-vendor" placeholder="Vendor / Model (optional)" value="${escapeHtml(prefill?.vendor || "")}">
+    <input type="text" class="mo-item-title" placeholder="Item name" value="${escapeHtml(prefill?.title || "")}">
+    <input type="number" class="mo-item-qty" min="1" step="1" value="${prefill?.quantity || 1}" placeholder="Qty">
+    <input type="number" class="mo-item-price" min="0" step="0.01" value="${prefill?.price ?? ""}" placeholder="Price ₹">
+    <button type="button" class="mo-item-remove" title="Remove item">✕</button>
+  `;
+  moItemsList.appendChild(row);
+  row.querySelectorAll(".mo-item-qty, .mo-item-price").forEach((el) => {
+    el.addEventListener("input", moUpdateTotal);
+  });
+  row.querySelector(".mo-item-remove").addEventListener("click", () => {
+    row.remove();
+    moUpdateTotal();
+  });
+  moUpdateTotal();
+}
+
+function moUpdateTotal() {
+  let total = 0;
+  moItemsList.querySelectorAll(".mo-item-row").forEach((row) => {
+    const qty = parseFloat(row.querySelector(".mo-item-qty").value) || 0;
+    const price = parseFloat(row.querySelector(".mo-item-price").value) || 0;
+    total += qty * price;
+  });
+  total += parseFloat(moShippingAmount.value) || 0;
+  moTotalDisplay.textContent = `₹${total.toFixed(2)}`;
+}
+moShippingAmount.addEventListener("input", moUpdateTotal);
+
+function moResetForm() {
+  moOrderId.value = "";
+  moCustomerName.value = "";
+  moPhone.value = "";
+  moPaymentType.value = "";
+  moAddress1.value = "";
+  moAddress2.value = "";
+  moCity.value = "";
+  moState.value = "";
+  moPincode.value = "";
+  moShippingAmount.value = "0";
+  moBalanceDue.value = "";
+  moItemsList.innerHTML = "";
+  moItemRowCount = 0;
+  moAddItemRow();
+  moUpdateTotal();
+}
+
+moAddItemBtn.addEventListener("click", () => moAddItemRow());
+
 pasteOrderBtn.addEventListener("click", () => {
-  pasteOrderText.value = "";
   pasteOrderError.hidden = true;
+  moResetForm();
   pasteOrderModal.hidden = false;
 });
 
@@ -435,19 +555,41 @@ closePasteOrderBtn.addEventListener("click", () => { pasteOrderModal.hidden = tr
 
 submitPasteOrderBtn.addEventListener("click", async () => {
   pasteOrderError.hidden = true;
-  const text = pasteOrderText.value.trim();
-  if (!text) {
-    pasteOrderError.textContent = "Paste some order text first.";
-    pasteOrderError.hidden = false;
-    return;
-  }
+
+  const items = [];
+  moItemsList.querySelectorAll(".mo-item-row").forEach((row) => {
+    const title = row.querySelector(".mo-item-title").value.trim();
+    if (!title) return;
+    items.push({
+      vendor: row.querySelector(".mo-item-vendor").value.trim(),
+      title,
+      quantity: row.querySelector(".mo-item-qty").value || 1,
+      price: row.querySelector(".mo-item-price").value || 0,
+    });
+  });
+
+  const payload = {
+    order_id: moOrderId.value.trim(),
+    customer_name: moCustomerName.value.trim(),
+    phone: moPhone.value.trim(),
+    payment_type: moPaymentType.value,
+    address1: moAddress1.value.trim(),
+    address2: moAddress2.value.trim(),
+    city: moCity.value.trim(),
+    state: moState.value,
+    pincode: moPincode.value.trim(),
+    shipping_amount: moShippingAmount.value || 0,
+    balance_due: moBalanceDue.value === "" ? null : moBalanceDue.value,
+    items,
+  };
+
   submitPasteOrderBtn.disabled = true;
   submitPasteOrderBtn.textContent = "Adding…";
   try {
-    const res = await fetch("/api/orders/paste", {
+    const res = await fetch("/api/orders/manual", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(payload),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -455,21 +597,18 @@ submitPasteOrderBtn.addEventListener("click", async () => {
       pasteOrderError.hidden = false;
       return;
     }
-    pasteOrderModal.hidden = true;
-    let msg = `Added ${data.items_added} item(s) across ${data.orders_touched} order(s).`;
-    if (data.warnings && data.warnings.length) {
-      msg += ` Skipped: ${data.warnings.join("; ")}`;
-    }
-    showMessage(msg, !!(data.warnings && data.warnings.length));
+    showMessage(`Added order ${moOrderId.value.trim()} with ${data.items_added} item(s).`);
+    moResetForm();
     loadOrders();
   } catch (err) {
     pasteOrderError.textContent = "Could not add order: " + err.message;
     pasteOrderError.hidden = false;
   } finally {
     submitPasteOrderBtn.disabled = false;
-    submitPasteOrderBtn.textContent = "Add";
+    submitPasteOrderBtn.textContent = "Add Order";
   }
 });
+
 
 filterButtons.forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -501,6 +640,14 @@ invoiceFilterButtons.forEach((btn) => {
     currentInvoiceFilter = btn.dataset.invoice;
     renderOrders(filterByTrackQuery(lastLoadedOrders));
   });
+});
+
+trashBtn.addEventListener("click", () => {
+  currentFilter = "trash";
+  currentInvoiceFilter = "";
+  filterButtons.forEach((b) => b.classList.remove("active"));
+  invoiceFilterRow.hidden = true;
+  loadOrders();
 });
 
 // ---------------------------------------------------------------------------
