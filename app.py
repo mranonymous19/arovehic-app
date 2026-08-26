@@ -525,8 +525,8 @@ def api_get_settings():
         # COD/Prepaid scheduling — see the "Routes - COD/Prepaid scheduling"
         # section below for how these are used.
         "cod_shipping_threshold": get_setting("cod_shipping_threshold", "140"),
-        "cod_staff_id": get_setting("cod_staff_id", ""),
-        "prepaid_staff_id": get_setting("prepaid_staff_id", ""),
+        "cod_staff_ids": _parse_staff_ids(get_setting("cod_staff_id", "")),
+        "prepaid_staff_ids": _parse_staff_ids(get_setting("prepaid_staff_id", "")),
     })
 
 
@@ -552,10 +552,17 @@ def api_save_settings():
 # means COD, Rs 70/75 means Prepaid). So instead of hardcoding that, we
 # store a single threshold: any order with shipping_amount >= threshold is
 # COD, everything below it is Prepaid. That threshold, plus which staff
-# member is on COD duty vs Prepaid duty, is saved here — assignment is a
-# standing rule ("X handles all COD orders"), not something set per order,
-# so every order (past and future) always reflects the current rule.
+# member(s) are on COD duty vs Prepaid duty, is saved here — assignment is
+# a standing rule ("X and Y handle all COD orders"), not something set per
+# order, so every order (past and future) always reflects the current rule.
+# Multiple staff can be assigned to the same category, and the same staff
+# member can be assigned to both — stored as a comma-separated list of user
+# ids in a single TEXT setting.
 # ---------------------------------------------------------------------------
+
+def _parse_staff_ids(raw):
+    return [s for s in (raw or "").split(",") if s]
+
 
 @app.route("/api/settings/schedule", methods=["GET"])
 @owner_required
@@ -567,8 +574,8 @@ def api_get_schedule_settings():
     cur.close()
     return jsonify({
         "cod_shipping_threshold": get_setting("cod_shipping_threshold", "140"),
-        "cod_staff_id": get_setting("cod_staff_id", ""),
-        "prepaid_staff_id": get_setting("prepaid_staff_id", ""),
+        "cod_staff_ids": _parse_staff_ids(get_setting("cod_staff_id", "")),
+        "prepaid_staff_ids": _parse_staff_ids(get_setting("prepaid_staff_id", "")),
         "staff": staff,
     })
 
@@ -585,12 +592,15 @@ def api_save_schedule_settings():
     if threshold < 0:
         return jsonify({"error": "COD shipping threshold can't be negative"}), 400
 
-    cod_staff_id = str(data.get("cod_staff_id") or "").strip()
-    prepaid_staff_id = str(data.get("prepaid_staff_id") or "").strip()
+    # Multiple staff can be assigned to the same category, and the same
+    # staff member can be assigned to both COD and Prepaid — stored as a
+    # comma-separated list of user ids (still a single TEXT setting value).
+    cod_staff_ids = [str(i).strip() for i in (data.get("cod_staff_ids") or []) if str(i).strip()]
+    prepaid_staff_ids = [str(i).strip() for i in (data.get("prepaid_staff_ids") or []) if str(i).strip()]
 
     set_setting("cod_shipping_threshold", str(threshold))
-    set_setting("cod_staff_id", cod_staff_id)
-    set_setting("prepaid_staff_id", prepaid_staff_id)
+    set_setting("cod_staff_id", ",".join(cod_staff_ids))
+    set_setting("prepaid_staff_id", ",".join(prepaid_staff_ids))
 
     db = get_db()
     cur = db.cursor()
@@ -601,8 +611,8 @@ def api_save_schedule_settings():
     return jsonify({
         "ok": True,
         "cod_shipping_threshold": str(threshold),
-        "cod_staff_id": cod_staff_id,
-        "prepaid_staff_id": prepaid_staff_id,
+        "cod_staff_ids": cod_staff_ids,
+        "prepaid_staff_ids": prepaid_staff_ids,
     })
 
 
@@ -940,12 +950,12 @@ def api_orders():
     # changing the threshold or the staff assignment always applies
     # retroactively to every order, past and future.
     cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
-    cod_staff_id = get_setting("cod_staff_id", "")
-    prepaid_staff_id = get_setting("prepaid_staff_id", "")
+    cod_staff_ids = _parse_staff_ids(get_setting("cod_staff_id", ""))
+    prepaid_staff_ids = _parse_staff_ids(get_setting("prepaid_staff_id", ""))
     staff_names = {}
-    staff_ids = [sid for sid in (cod_staff_id, prepaid_staff_id) if sid]
-    if staff_ids:
-        cur.execute("SELECT id, name FROM users WHERE id = ANY(%s)", ([int(s) for s in staff_ids],))
+    all_staff_ids = set(cod_staff_ids) | set(prepaid_staff_ids)
+    if all_staff_ids:
+        cur.execute("SELECT id, name FROM users WHERE id = ANY(%s)", ([int(s) for s in all_staff_ids],))
         staff_names = {str(r["id"]): r["name"] for r in cur.fetchall()}
 
     # Fetch items for ALL orders in a single query instead of one query per
@@ -980,19 +990,20 @@ def api_orders():
             # existed) — payment type can't be determined, so leave it
             # unset rather than guessing.
             payment_type = None
-            assigned_staff_id = None
+            assigned_staff_ids = []
             assigned_to = None
         else:
             payment_type = resolve_payment_type(order, cod_threshold)
-            assigned_staff_id = cod_staff_id if payment_type == "cod" else prepaid_staff_id
-            assigned_to = staff_names.get(str(assigned_staff_id)) if assigned_staff_id else None
+            assigned_staff_ids = cod_staff_ids if payment_type == "cod" else prepaid_staff_ids
+            names = [staff_names[sid] for sid in assigned_staff_ids if sid in staff_names]
+            assigned_to = ", ".join(names) if names else None
 
         # Staff accounts only see orders currently assigned to them (their
         # COD/Prepaid duty from Settings -> Schedule) — everyone else
         # (owner, telecaller, packer, accounts) sees the full list, subject
         # to whatever other filters apply below.
         if session.get("role") == "staff":
-            if not assigned_staff_id or str(assigned_staff_id) != str(session.get("user_id")):
+            if str(session.get("user_id")) not in assigned_staff_ids:
                 continue
 
         if payment_filter in ("cod", "prepaid") and payment_type != payment_filter:
@@ -1184,7 +1195,7 @@ def api_restore_order(order_id):
 
 
 def order_assigned_to_user(cur, order_id, user_id):
-    """True if `order_id`'s current COD/Prepaid duty staff is `user_id`.
+    """True if `order_id`'s current COD/Prepaid duty staff includes `user_id`.
 
     Mirrors the assignment logic in /api/orders — used to stop a staff
     account from editing items on an order that isn't (or is no longer)
@@ -1198,8 +1209,10 @@ def order_assigned_to_user(cur, order_id, user_id):
     payment_type = resolve_payment_type(order, cod_threshold)
     if payment_type is None:
         return False
-    assigned_staff_id = get_setting("cod_staff_id" if payment_type == "cod" else "prepaid_staff_id", "")
-    return bool(assigned_staff_id) and str(assigned_staff_id) == str(user_id)
+    assigned_staff_ids = _parse_staff_ids(
+        get_setting("cod_staff_id" if payment_type == "cod" else "prepaid_staff_id", "")
+    )
+    return str(user_id) in assigned_staff_ids
 
 
 @app.route("/api/items/<item_id>/status", methods=["POST"])

@@ -575,6 +575,34 @@ main {
   color: var(--ink);
 }
 
+.staff-checkbox-list {
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 8px 10px;
+  margin-bottom: 16px;
+  background: var(--card);
+  max-height: 160px;
+  overflow-y: auto;
+}
+.staff-checkbox-list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink);
+  padding: 4px 0;
+  margin-bottom: 0;
+  cursor: pointer;
+}
+.staff-checkbox-list label input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+.staff-checkbox-list .staff-checkbox-empty {
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .users-table {
   width: 100%;
   border-collapse: collapse;

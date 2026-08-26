@@ -77,10 +77,10 @@
       </p>
       <label for="codThresholdInput">COD shipping threshold (₹)</label>
       <input id="codThresholdInput" type="number" step="0.01" min="0" placeholder="140">
-      <label for="codStaffSelect">Staff assigned to COD orders</label>
-      <select id="codStaffSelect"><option value="">— none —</option></select>
-      <label for="prepaidStaffSelect">Staff assigned to Prepaid orders</label>
-      <select id="prepaidStaffSelect"><option value="">— none —</option></select>
+      <label>Staff assigned to COD orders</label>
+      <div id="codStaffList" class="staff-checkbox-list"></div>
+      <label>Staff assigned to Prepaid orders</label>
+      <div id="prepaidStaffList" class="staff-checkbox-list"></div>
       <div id="scheduleError" class="field-error" hidden></div>
       <div class="modal-actions">
         <button id="saveScheduleBtn" class="btn btn-primary">Save schedule</button>

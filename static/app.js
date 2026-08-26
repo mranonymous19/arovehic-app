@@ -41,8 +41,8 @@ const dateToInput = document.getElementById("dateToInput");
 const clearDateFilterBtn = document.getElementById("clearDateFilterBtn");
 
 const codThresholdInput = document.getElementById("codThresholdInput");
-const codStaffSelect = document.getElementById("codStaffSelect");
-const prepaidStaffSelect = document.getElementById("prepaidStaffSelect");
+const codStaffList = document.getElementById("codStaffList");
+const prepaidStaffList = document.getElementById("prepaidStaffList");
 const scheduleError = document.getElementById("scheduleError");
 const saveScheduleBtn = document.getElementById("saveScheduleBtn");
 
@@ -714,18 +714,26 @@ async function loadScheduleSettings() {
   const data = await res.json();
   codThresholdInput.value = data.cod_shipping_threshold || "140";
 
-  const fillStaffSelect = (select, selectedId) => {
-    select.innerHTML = `<option value="">— none —</option>`;
+  const fillStaffCheckboxes = (container, selectedIds, groupName) => {
+    container.innerHTML = "";
+    if (!data.staff.length) {
+      container.innerHTML = `<span class="staff-checkbox-empty">No staff accounts yet — add one in Manage Users.</span>`;
+      return;
+    }
     for (const s of data.staff) {
-      const opt = document.createElement("option");
-      opt.value = s.id;
-      opt.textContent = s.name;
-      if (String(s.id) === String(selectedId)) opt.selected = true;
-      select.appendChild(opt);
+      const id = `${groupName}-${s.id}`;
+      const label = document.createElement("label");
+      label.innerHTML = `<input type="checkbox" id="${id}" value="${s.id}"> ${escapeHtml(s.name)}`;
+      label.querySelector("input").checked = selectedIds.map(String).includes(String(s.id));
+      container.appendChild(label);
     }
   };
-  fillStaffSelect(codStaffSelect, data.cod_staff_id);
-  fillStaffSelect(prepaidStaffSelect, data.prepaid_staff_id);
+  fillStaffCheckboxes(codStaffList, data.cod_staff_ids || [], "cod");
+  fillStaffCheckboxes(prepaidStaffList, data.prepaid_staff_ids || [], "prepaid");
+}
+
+function checkedStaffIds(container) {
+  return Array.from(container.querySelectorAll("input[type=checkbox]:checked")).map((cb) => cb.value);
 }
 
 saveScheduleBtn.addEventListener("click", async () => {
@@ -735,8 +743,8 @@ saveScheduleBtn.addEventListener("click", async () => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       cod_shipping_threshold: codThresholdInput.value,
-      cod_staff_id: codStaffSelect.value,
-      prepaid_staff_id: prepaidStaffSelect.value,
+      cod_staff_ids: checkedStaffIds(codStaffList),
+      prepaid_staff_ids: checkedStaffIds(prepaidStaffList),
     }),
   });
   const data = await res.json();
