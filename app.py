@@ -1081,6 +1081,15 @@ def api_order_invoice(order_id):
         cur.close()
         return jsonify({"error": "This order isn't in Billing yet."}), 400
 
+    # Same COD/Prepaid rule used by /api/orders — an explicit payment_type
+    # (manually-entered orders) wins, otherwise derived from the shipping
+    # charge against the threshold in Settings -> Schedule. Computed here,
+    # before the invoice number, so COD orders get a COD/... number and
+    # everything else keeps the SHP/... prefix.
+    cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
+    payment_type = resolve_payment_type(order, cod_threshold) or "prepaid"
+    invoice_prefix = "COD" if payment_type == "cod" else "SHP"
+
     if not order["invoice_number"]:
         # Assign the next number from a continuous counter (starts at 2501)
         # the first time this order is printed, and lock the settings row
@@ -1097,7 +1106,7 @@ def api_order_invoice(order_id):
         )
         now = datetime.now()
         invoice_date = now.strftime("%-d-%b-%y")
-        invoice_number = f"SHP/{seq}/{now.year}"
+        invoice_number = f"{invoice_prefix}/{seq}/{now.year}"
         cur.execute(
             "UPDATE orders SET invoice_number = %s, invoice_date = %s WHERE shopify_order_id = %s",
             (invoice_number, invoice_date, order_id),
@@ -1109,12 +1118,8 @@ def api_order_invoice(order_id):
 
     cur.close()
 
-    # Same COD/Prepaid rule used by /api/orders — an explicit payment_type
-    # (manually-entered orders) wins, otherwise derived from the shipping
-    # charge against the threshold in Settings -> Schedule.
     order_dict = dict(order)
-    cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
-    order_dict["payment_type"] = resolve_payment_type(order_dict, cod_threshold) or "prepaid"
+    order_dict["payment_type"] = payment_type
 
     # Shopify's balance_due reflects the order's original full total — it
     # has no idea an item was later marked N/A (couldn't be sourced, not
