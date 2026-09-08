@@ -211,6 +211,16 @@ a.btn { text-decoration: none; display: inline-block; }
   background: var(--amber-bg);
   border: 1px solid var(--amber);
 }
+.amount-to-receive-badge {
+  color: var(--blue);
+  background: var(--blue-bg);
+  border: 1px solid var(--blue);
+}
+.billed-date-badge {
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line);
+}
 
 main {
   padding: 20px 28px 60px;

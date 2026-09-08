@@ -295,6 +295,12 @@ function renderOrders(orders) {
           ? `<span class="invoice-badge invoice-badge-printed">Invoice Printed · ${escapeHtml(order.invoice_number)}</span>`
           : `<span class="invoice-badge invoice-badge-not-printed">Not Printed</span>`)
       : "";
+    const amountBadge = (showInvoiceBtn && order.payment_type === "cod" && order.amount_to_receive != null)
+      ? `<span class="invoice-badge amount-to-receive-badge">To Receive · ₹${Number(order.amount_to_receive).toFixed(2)}</span>`
+      : "";
+    const billedDateBadge = (showInvoiceBtn && order.billed_at)
+      ? `<span class="invoice-badge billed-date-badge">Billed · ${new Date(order.billed_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</span>`
+      : "";
     head.innerHTML = `
       <span class="order-head-left">
         <span class="order-name">${escapeHtml(order.order_name)}</span>
@@ -302,6 +308,8 @@ function renderOrders(orders) {
         ${order.closed ? `<span class="order-closed-badge">Closed</span>` : ""}
         ${paymentBadge}
         ${invoiceBadge}
+        ${amountBadge}
+        ${billedDateBadge}
         ${assignedTo}
       </span>
       <span class="order-head-actions">

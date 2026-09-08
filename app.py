@@ -629,14 +629,16 @@ def api_sync():
 
     # The first call to the n8n webhook after some idle time has reliably
     # failed here (both connection errors and an HTML error page instead of
-    # JSON), while an immediate retry succeeds — likely n8n "waking up" the
-    # webhook registration. Rather than surface that to the owner every
-    # time, retry once automatically before giving up.
+    # JSON), while a retry after a short pause succeeds — likely n8n
+    # "waking up" the webhook registration. Rather than surface that to the
+    # owner every time, retry automatically (with an increasing pause)
+    # before giving up.
     last_error = None
     payload = None
-    for attempt in range(2):
-        if attempt == 1:
-            time.sleep(2)
+    delays = [0, 3, 6]
+    for attempt, delay in enumerate(delays):
+        if delay:
+            time.sleep(delay)
         try:
             resp = requests.get(webhook_url, timeout=180)
             resp.raise_for_status()
@@ -975,6 +977,7 @@ def api_orders():
     result = []
     for order in orders:
         items = items_by_order.get(order["shopify_order_id"], [])
+        all_order_items = items  # unfiltered — status_filter below may narrow `items`
         # An order is "Closed" once every item in it has a final status —
         # purchased / stock / na — with none left pending (1, 2, or more
         # items, doesn't matter). This is computed fresh on every request
@@ -1029,6 +1032,36 @@ def api_orders():
             if not items:
                 continue
 
+        # Same "Amount to be Received" the invoice itself shows — computed
+        # here too so it can be displayed right on the order card, without
+        # needing to open/print the PDF. Only meaningful for COD orders
+        # that have at least one purchased/in-stock item (i.e. reached
+        # Billing); mirrors invoice.py's grand_total and N/A-item
+        # deduction from balance_due exactly, so the two never disagree.
+        billing_items_for_amount = [i for i in all_order_items if i["status"] in ("purchased", "stock")]
+        amount_to_receive = None
+        if payment_type == "cod" and billing_items_for_amount:
+            total_incl = sum(
+                float(i["price"] or 0) * (i["quantity"] or 0) for i in billing_items_for_amount
+            )
+            grand_total = round(total_incl + float(shipping_amount or 0), 2)
+            balance_due = order["balance_due"]
+            if balance_due is not None:
+                na_items = [i for i in all_order_items if i["status"] == "na"]
+                na_value = sum(float(i["price"] or 0) * (i["quantity"] or 0) for i in na_items)
+                amount_to_receive = round(max(0.0, float(balance_due) - na_value), 2)
+            else:
+                amount_to_receive = grand_total
+
+        # When this order most recently became Billing-eligible — the
+        # latest status-change timestamp among its purchased/in-stock
+        # items (whichever one a staff member marked last is effectively
+        # when the order was ready to bill).
+        billed_at = None
+        billed_timestamps = [i["updated_at"] for i in billing_items_for_amount if i["updated_at"]]
+        if billed_timestamps:
+            billed_at = max(billed_timestamps)
+
         result.append(
             {
                 "order_id": order["shopify_order_id"],
@@ -1044,6 +1077,8 @@ def api_orders():
                 "created_at": order["created_at"],
                 "closed": closed,
                 "payment_type": payment_type,
+                "amount_to_receive": amount_to_receive,
+                "billed_at": billed_at,
                 "assigned_to": assigned_to,
                 "invoice_number": order["invoice_number"],
                 "deleted_at": order["deleted_at"],
