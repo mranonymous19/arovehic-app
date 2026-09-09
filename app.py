@@ -1090,6 +1090,87 @@ def api_orders():
     return jsonify(result)
 
 
+@app.route("/api/orders/export/pending.xlsx", methods=["GET"])
+@login_required
+def api_export_pending_orders():
+    """Excel export of every Pending item, split into a COD sheet and a
+    Prepaid sheet. Honors the same date_from/date_to range as the main
+    order list (omit both to export every Pending order regardless of
+    date). One row per pending item — Order ID, the item exactly as shown
+    in the app, and a blank Vendor column for the purchase team to fill in.
+    """
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    db = get_db()
+    cur = db.cursor()
+    date_from = request.args.get("date_from")
+    date_to = request.args.get("date_to")
+
+    query = "SELECT * FROM orders WHERE deleted_at IS NULL"
+    params = []
+    if date_from:
+        query += " AND NULLIF(created_at, '')::date >= %s::date"
+        params.append(date_from)
+    if date_to:
+        query += " AND NULLIF(created_at, '')::date <= %s::date"
+        params.append(date_to)
+    query += " ORDER BY created_at DESC"
+    cur.execute(query, params)
+    orders = cur.fetchall()
+
+    order_ids = [o["shopify_order_id"] for o in orders]
+    items_by_order = {oid: [] for oid in order_ids}
+    if order_ids:
+        cur.execute("SELECT * FROM items WHERE shopify_order_id = ANY(%s)", (order_ids,))
+        for item in cur.fetchall():
+            items_by_order.setdefault(item["shopify_order_id"], []).append(item)
+
+    cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
+    cur.close()
+
+    rows = {"cod": [], "prepaid": []}
+    for order in orders:
+        pending_items = [i for i in items_by_order.get(order["shopify_order_id"], []) if i["status"] == "pending"]
+        if not pending_items:
+            continue
+        payment_type = resolve_payment_type(order, cod_threshold)
+        if payment_type not in ("cod", "prepaid"):
+            continue  # can't tell which sheet it belongs on — leave it out rather than guess
+        for item in pending_items:
+            item_text = item["title"] or ""
+            if item["variant_title"]:
+                item_text += f" — {item['variant_title']}"
+            rows[payment_type].append([order["order_name"], item_text, ""])
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    for sheet_key, sheet_name in (("cod", "COD"), ("prepaid", "Prepaid")):
+        ws = wb.create_sheet(sheet_name)
+        ws.append(["Order ID", "Item", "Vendor"])
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+        for row in rows[sheet_key]:
+            ws.append(row)
+        ws.column_dimensions["A"].width = 16
+        ws.column_dimensions["B"].width = 60
+        ws.column_dimensions["C"].width = 20
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    filename = "pending_orders.xlsx"
+    if date_from or date_to:
+        filename = f"pending_orders_{date_from or 'start'}_to_{date_to or 'now'}.xlsx"
+    return send_file(
+        buf,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=filename,
+    )
+
+
 @app.route("/api/orders/<order_id>/invoice.pdf", methods=["GET"])
 @login_required
 def api_order_invoice(order_id):

@@ -39,6 +39,7 @@ const invoiceFilterButtons = document.querySelectorAll(".filter-btn[data-invoice
 const dateFromInput = document.getElementById("dateFromInput");
 const dateToInput = document.getElementById("dateToInput");
 const clearDateFilterBtn = document.getElementById("clearDateFilterBtn");
+const exportPendingBtn = document.getElementById("exportPendingBtn");
 
 const codThresholdInput = document.getElementById("codThresholdInput");
 const codStaffList = document.getElementById("codStaffList");
@@ -628,6 +629,7 @@ filterButtons.forEach((btn) => {
       currentInvoiceFilter = "";
       invoiceFilterButtons.forEach((b) => b.classList.toggle("active", b.dataset.invoice === ""));
     }
+    exportPendingBtn.hidden = currentFilter !== "pending";
     loadOrders();
   });
 });
@@ -685,6 +687,13 @@ clearDateFilterBtn.addEventListener("click", () => {
   dateToInput.value = "";
   updateClearDateFilterVisibility();
   loadOrders();
+});
+
+exportPendingBtn.addEventListener("click", () => {
+  const params = new URLSearchParams();
+  if (currentDateFrom) params.set("date_from", currentDateFrom);
+  if (currentDateTo) params.set("date_to", currentDateTo);
+  window.location.href = `/api/orders/export/pending.xlsx?${params.toString()}`;
 });
 
 // ---------------------------------------------------------------------------

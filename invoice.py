@@ -239,8 +239,8 @@ def build_invoice_pdf(order, items, invoice_number, invoice_date_str):
     right_rows_h = ROW_H * N_LABEL_ROWS
 
     SELLER_H = right_rows_h
-    CONSIGNEE_H = 70
-    BUYER_H = 70
+    CONSIGNEE_H = 81
+    BUYER_H = 81
     LEFT_H = SELLER_H + CONSIGNEE_H + BUYER_H
     TERMS_H = LEFT_H - right_rows_h
 
@@ -273,6 +273,9 @@ def build_invoice_pdf(order, items, invoice_number, invoice_date_str):
     cy -= 11
     _text(c, x0 + 4, cy, order.get("customer_name") or "", font="Helvetica-Bold", size=8.5)
     cy -= 11
+    if order.get("order_name"):
+        _text(c, x0 + 4, cy, f"Order ID: {order['order_name']}", font="Helvetica", size=8)
+        cy -= 10.5
     addr_parts = [order.get("shipping_address1"), order.get("shipping_address2"),
                   order.get("shipping_city"), order.get("shipping_pincode")]
     addr_line = ", ".join(p for p in addr_parts if p)
@@ -295,6 +298,9 @@ def build_invoice_pdf(order, items, invoice_number, invoice_date_str):
     by -= 11
     _text(c, x0 + 4, by, order.get("customer_name") or "", font="Helvetica-Bold", size=8.5)
     by -= 11
+    if order.get("order_name"):
+        _text(c, x0 + 4, by, f"Order ID: {order['order_name']}", font="Helvetica", size=8)
+        by -= 10.5
     for wline in _wrap(addr_line, "Helvetica", 8, LEFT_W - 8)[:2]:
         _text(c, x0 + 4, by, wline, font="Helvetica", size=8)
         by -= 10.5
