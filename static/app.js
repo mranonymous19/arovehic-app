@@ -136,6 +136,20 @@ async function loadMe() {
     filterButtons.forEach((b) => b.classList.toggle("active", b.dataset.status === "billing"));
     invoiceFilterRow.hidden = false;
   }
+
+  if (currentRole === "packer") {
+    // A packer only ever needs Billing orders whose invoice has already
+    // been printed — that's the signal packing can start. Lock to Billing
+    // + Printed and hide the other tabs/sub-filter entirely, enforced
+    // server-side too in /api/orders so it can't be bypassed.
+    filterButtons.forEach((btn) => {
+      if (btn.dataset.status !== "billing") btn.hidden = true;
+    });
+    currentFilter = "billing";
+    currentInvoiceFilter = "printed";
+    filterButtons.forEach((b) => b.classList.toggle("active", b.dataset.status === "billing"));
+    invoiceFilterRow.hidden = true;
+  }
 }
 
 function canEditStatus() {
@@ -158,6 +172,7 @@ async function loadOrders() {
   if (currentPaymentFilter) params.set("payment", currentPaymentFilter);
   if (currentDateFrom) params.set("date_from", currentDateFrom);
   if (currentDateTo) params.set("date_to", currentDateTo);
+  if (currentFilter === "billing" && currentInvoiceFilter) params.set("invoice", currentInvoiceFilter);
   const url = params.toString() ? `/api/orders?${params.toString()}` : "/api/orders";
   const res = await fetch(url);
   const orders = await res.json();

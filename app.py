@@ -927,6 +927,14 @@ def api_orders():
     if session.get("role") == "accounts":
         status_filter = "billing"
 
+    # Packer only ever needs Billing orders whose invoice has already been
+    # printed — that's the signal packing is ready to start. Force both,
+    # server-side, same reasoning as Accounts above.
+    invoice_filter = request.args.get("invoice")  # 'printed' or 'not_printed'
+    if session.get("role") == "packer":
+        status_filter = "billing"
+        invoice_filter = "printed"
+
     if status_filter == "trash" and session.get("role") != "owner":
         return jsonify({"error": "Only the owner can view Trash"}), 403
 
@@ -1010,6 +1018,11 @@ def api_orders():
                 continue
 
         if payment_filter in ("cod", "prepaid") and payment_type != payment_filter:
+            continue
+
+        if invoice_filter == "printed" and not order["invoice_number"]:
+            continue
+        if invoice_filter == "not_printed" and order["invoice_number"]:
             continue
 
         if status_filter == "closed":
