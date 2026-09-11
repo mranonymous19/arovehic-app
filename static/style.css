@@ -127,8 +127,8 @@ a.btn { text-decoration: none; display: inline-block; }
   min-width: 220px;
   border: 1px solid var(--line);
   border-radius: 999px;
-  padding: 7px 16px;
-  font-size: 12px;
+  padding: 9px 16px;
+  font-size: 14px;
   background: var(--card);
   color: var(--ink);
 }
@@ -137,8 +137,8 @@ a.btn { text-decoration: none; display: inline-block; }
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 999px;
-  padding: 6px 14px;
-  font-size: 12px;
+  padding: 8px 16px;
+  font-size: 13px;
   color: var(--muted);
 }
 .filter-btn.active {
@@ -155,8 +155,8 @@ a.btn { text-decoration: none; display: inline-block; }
 .date-filter-input {
   border: 1px solid var(--line);
   border-radius: 3px;
-  padding: 6px 10px;
-  font-size: 12px;
+  padding: 7px 10px;
+  font-size: 14px;
   background: var(--card);
   color: var(--ink);
   font-family: 'Inter', sans-serif;
@@ -170,7 +170,7 @@ a.btn { text-decoration: none; display: inline-block; }
 }
 
 .payment-badge {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -189,12 +189,12 @@ a.btn { text-decoration: none; display: inline-block; }
 }
 
 .assigned-to {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
 }
 
 .invoice-badge {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -238,33 +238,37 @@ main {
 
 .order-head {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
-  align-items: baseline;
-  padding: 12px 18px;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
   background: #efece3;
   border-bottom: 1px solid var(--line);
 }
 
 .order-head-left {
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  flex-wrap: wrap;
+  row-gap: 6px;
   gap: 10px;
 }
 
 .order-head .order-name {
   font-family: 'Sora', sans-serif;
   font-weight: 700;
-  font-size: 15px;
+  font-size: 16px;
   letter-spacing: 0.01em;
 }
 
 .order-head .customer {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .order-closed-badge {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -276,11 +280,11 @@ main {
 }
 
 .order-history-link {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
   border: 1px solid var(--line);
   border-radius: 999px;
-  padding: 4px 10px;
+  padding: 6px 12px;
   background: var(--card);
   white-space: nowrap;
 }
@@ -288,6 +292,7 @@ main {
 
 .order-head-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
@@ -299,63 +304,64 @@ main {
 
 .item-row {
   display: grid;
-  grid-template-columns: 1fr auto auto auto;
+  grid-template-columns: 1fr auto auto;
   gap: 14px;
   align-items: center;
-  padding: 12px 18px;
+  padding: 14px 18px;
   border-bottom: 1px solid var(--line);
 }
 .item-row:last-child { border-bottom: none; }
 
-.item-title { font-size: 13px; }
-.item-meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.item-title { font-size: 14px; }
+.item-meta { color: var(--muted); font-size: 13px; margin-top: 3px; }
 
 .purchase-amount-input {
-  width: 90px;
+  width: 100px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 6px 8px;
-  font-size: 12px;
+  padding: 8px 10px;
+  font-size: 16px;
   background: var(--card);
   color: var(--ink);
 }
 .purchase-amount-readonly {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
   min-width: 60px;
   text-align: right;
 }
 
-.packed-checkbox {
-  display: flex;
+.order-packed-checkbox {
+  display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 600;
   color: var(--ink);
   white-space: nowrap;
+  cursor: pointer;
 }
-.packed-readonly {
-  font-size: 12px;
-  color: var(--muted);
-  min-width: 70px;
-  text-align: right;
-}
-.packed-readonly.packed-yes {
-  color: var(--green, #1a8a4a);
+.order-packed-checkbox input { width: auto; margin: 0; }
+.packed-yes-badge {
+  color: var(--green);
+  background: var(--green-bg);
+  border: 1px solid var(--green);
 }
 
 .status-pills {
   display: flex;
-  gap: 6px;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .pill {
   border: 1px solid var(--line);
   background: var(--card);
   border-radius: 999px;
-  padding: 5px 10px;
-  font-size: 11px;
+  padding: 8px 14px;
+  font-size: 13px;
   color: var(--muted);
+  min-height: 34px;
 }
 
 .pill[data-status="pending"].active { background: var(--amber-bg); color: var(--amber); border-color: var(--amber); }
@@ -637,7 +643,7 @@ main {
 
 .users-table-actions { text-align: right; white-space: nowrap; }
 
-.btn-small { padding: 5px 10px; font-size: 11px; margin-left: 6px; border: 1px solid var(--line); color: var(--ink); }
+.btn-small { padding: 7px 12px; font-size: 12px; margin-left: 6px; border: 1px solid var(--line); color: var(--ink); }
 .btn-small:hover { background: var(--gray-bg); }
 
 /* ---------------------------------------------------------------------- */
@@ -679,9 +685,42 @@ main {
 .empty-log { color: var(--muted); font-size: 13px; padding: 20px 4px; text-align: center; }
 
 @media (max-width: 640px) {
-  .topbar { flex-direction: column; align-items: flex-start; gap: 10px; }
-  .topbar-actions { flex-wrap: wrap; }
-  .item-row { grid-template-columns: 1fr; }
-  .status-pills { flex-wrap: wrap; }
+  .topbar { flex-direction: column; align-items: flex-start; gap: 10px; padding: 16px 18px; }
+  .topbar-actions { flex-wrap: wrap; gap: 8px; }
+  .topbar-actions .btn { padding: 10px 14px; font-size: 13px; }
+
+  main { padding: 16px 14px 60px; }
+  .filters { padding: 14px 14px 0; gap: 10px; }
+  .filter-btn { padding: 9px 16px; font-size: 13px; }
+  .order-track-input { flex-basis: 100%; padding: 11px 16px; }
+
+  /* Every text input/select at 16px on phones — anything smaller makes
+     iOS Safari zoom the whole page in when it's tapped, which is exactly
+     the "have to zoom" problem. */
+  input, select, textarea { font-size: 16px !important; }
+
+  .order-head { padding: 14px 16px; gap: 8px; }
+  .order-head .order-name { font-size: 16px; }
+  .order-head .customer { font-size: 13px; }
+  .order-head-actions .btn,
+  .order-head-actions button { padding: 9px 14px; font-size: 13px; }
+  .order-packed-checkbox { font-size: 14px; }
+  .order-packed-checkbox input { width: 20px; height: 20px; }
+
+  /* Item rows: title on its own line, then amount + status pills wrap
+     underneath with generous spacing and larger tap targets — this was
+     the main cramped area on phones. */
+  .item-row {
+    grid-template-columns: 1fr;
+    row-gap: 12px;
+    padding: 16px;
+  }
+  .item-title { font-size: 15px; }
+  .item-meta { font-size: 13px; }
+  .purchase-amount-block { order: 2; }
+  .status-pills { order: 3; width: 100%; gap: 10px; }
+  .pill { padding: 10px 16px; font-size: 14px; flex: 1 1 auto; text-align: center; min-height: 40px; }
+  .purchase-amount-input { width: 140px; padding: 10px 12px; }
+
   .users-table { font-size: 12px; }
 }

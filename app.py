@@ -173,6 +173,9 @@ def init_db():
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS balance_due NUMERIC;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_type TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_at TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS packed BOOLEAN NOT NULL DEFAULT false;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS packed_by TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS packed_at TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_number TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_date TEXT;
         """
@@ -1092,6 +1095,9 @@ def api_orders():
                 "payment_type": payment_type,
                 "amount_to_receive": amount_to_receive,
                 "billed_at": billed_at,
+                "packed": order["packed"],
+                "packed_by": order["packed_by"],
+                "packed_at": order["packed_at"],
                 "assigned_to": assigned_to,
                 "invoice_number": order["invoice_number"],
                 "deleted_at": order["deleted_at"],
@@ -1477,6 +1483,51 @@ def api_update_item_packed(item_id):
     db.commit()
     cur.close()
     return jsonify({"ok": True, "id": item_id, "packed": packed, "packed_by": packed_by, "packed_at": packed_at})
+
+
+@app.route("/api/orders/<order_id>/packed", methods=["POST"])
+@packer_or_owner_required
+def api_update_order_packed(order_id):
+    data = request.get_json(force=True) or {}
+    if "packed" not in data:
+        return jsonify({"error": "packed is required"}), 400
+    packed = bool(data.get("packed"))
+
+    who = session.get("name", "")
+    now = datetime.now(timezone.utc).isoformat()
+    packed_by = who if packed else None
+    packed_at = now if packed else None
+
+    db = get_db()
+    cur = db.cursor()
+    # Packing only makes sense once the order actually has something in
+    # hand to pack — at least one purchased/in-stock item (i.e. it's
+    # reached Billing). Checked here rather than trusting the frontend,
+    # since packer accounts can call this directly.
+    cur.execute(
+        "SELECT 1 FROM items WHERE shopify_order_id = %s AND status IN ('purchased', 'stock') LIMIT 1",
+        (order_id,),
+    )
+    if packed and cur.fetchone() is None:
+        cur.close()
+        return jsonify({"error": "Order has no purchased or in-stock items to pack"}), 400
+
+    cur.execute(
+        "UPDATE orders SET packed = %s, packed_by = %s, packed_at = %s WHERE shopify_order_id = %s "
+        "RETURNING order_name",
+        (packed, packed_by, packed_at, order_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        cur.close()
+        return jsonify({"error": "Order not found"}), 404
+
+    log_activity(cur, None, row["order_name"] or order_id, "packed_update",
+                 f"{who} marked order {row['order_name'] or order_id} as {'packed' if packed else 'not packed'}",
+                 order_id=order_id)
+    db.commit()
+    cur.close()
+    return jsonify({"ok": True, "order_id": order_id, "packed": packed, "packed_by": packed_by, "packed_at": packed_at})
 
 
 @app.route("/api/activity-log", methods=["GET"])

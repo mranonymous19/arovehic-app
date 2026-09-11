@@ -317,6 +317,11 @@ function renderOrders(orders) {
     const billedDateBadge = (showInvoiceBtn && order.billed_at)
       ? `<span class="invoice-badge billed-date-badge">Billed · ${new Date(order.billed_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</span>`
       : "";
+    const billingEligible = (order.items || []).some((i) => i.status === "purchased" || i.status === "stock");
+    const canPack = canTogglePacked() && billingEligible;
+    const packedReadonlyBadge = (!canTogglePacked() && order.packed)
+      ? `<span class="invoice-badge packed-yes-badge">Packed</span>`
+      : "";
     head.innerHTML = `
       <span class="order-head-left">
         <span class="order-name">${escapeHtml(order.order_name)}</span>
@@ -326,15 +331,22 @@ function renderOrders(orders) {
         ${invoiceBadge}
         ${amountBadge}
         ${billedDateBadge}
+        ${packedReadonlyBadge}
         ${assignedTo}
       </span>
       <span class="order-head-actions">
+        ${canPack ? `<label class="order-packed-checkbox"><input type="checkbox" class="order-packed-input" ${order.packed ? "checked" : ""} /> Packed</label>` : ""}
         ${showInvoiceBtn ? `<button type="button" class="btn btn-ghost btn-small order-invoice-link" data-order-id="${escapeHtml(order.order_id)}">${order.invoice_number ? "Reprint Invoice" : "Print Invoice"}</button>` : ""}
         ${currentRole === "owner" ? `<button type="button" class="order-history-link" data-order-id="${escapeHtml(order.order_id)}">History</button>` : ""}
         ${currentRole === "owner" && currentFilter === "trash" ? `<button type="button" class="btn btn-primary btn-small order-restore-link" data-order-id="${escapeHtml(order.order_id)}">Restore</button>` : ""}
         ${currentRole === "owner" && currentFilter !== "trash" ? `<button type="button" class="btn btn-ghost btn-small btn-danger order-delete-link" data-order-id="${escapeHtml(order.order_id)}">Delete</button>` : ""}
       </span>
     `;
+    if (canPack) {
+      head.querySelector(".order-packed-input").addEventListener("change", (e) => {
+        updateOrderPacked(order.order_id, e.target.checked, e.target);
+      });
+    }
     if (showInvoiceBtn) {
       head.querySelector(".order-invoice-link").addEventListener("click", (e) => {
         printInvoice(order.order_id, e.currentTarget);
@@ -398,31 +410,14 @@ function renderItemRow(item) {
     pills.appendChild(pill);
   }
 
-  const packedBlock = document.createElement("div");
-  packedBlock.className = "packed-block";
-  const packable = item.status === "purchased" || item.status === "stock";
-  if (!packable) {
-    packedBlock.innerHTML = `<div class="packed-readonly">—</div>`;
-  } else if (canTogglePacked()) {
-    const label = document.createElement("label");
-    label.className = "packed-checkbox";
-    label.innerHTML = `<input type="checkbox" ${item.packed ? "checked" : ""} /> Packed`;
-    const checkbox = label.querySelector("input");
-    checkbox.addEventListener("change", () => updatePacked(item.id, checkbox.checked, packedBlock));
-    packedBlock.appendChild(label);
-  } else {
-    packedBlock.innerHTML = `<div class="packed-readonly ${item.packed ? "packed-yes" : ""}">${item.packed ? "Packed" : "Not packed"}</div>`;
-  }
-
   row.appendChild(titleBlock);
   row.appendChild(purchaseBlock);
   row.appendChild(pills);
-  row.appendChild(packedBlock);
   return row;
 }
 
-async function updatePacked(itemId, packed, blockEl) {
-  const res = await fetch(`/api/items/${itemId}/packed`, {
+async function updateOrderPacked(orderId, packed, checkboxEl) {
+  const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/packed`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ packed }),
@@ -430,11 +425,12 @@ async function updatePacked(itemId, packed, blockEl) {
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     showMessage(err.error || "Could not update packed status.", true);
-    const checkbox = blockEl.querySelector("input");
-    if (checkbox) checkbox.checked = !packed;
+    if (checkboxEl) checkboxEl.checked = !packed;
     return;
   }
-  showMessage(packed ? "Marked as packed" : "Marked as not packed");
+  const order = lastLoadedOrders.find((o) => o.order_id === orderId);
+  if (order) order.packed = packed;
+  showMessage(packed ? "Order marked as packed" : "Order marked as not packed");
 }
 
 async function updatePurchaseAmount(itemId, value, inputEl) {
