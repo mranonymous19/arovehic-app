@@ -20,7 +20,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from invoice import build_invoice_pdf
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
-VALID_STATUSES = {"pending", "purchased", "stock", "na"}
+VALID_STATUSES = {"pending", "purchased", "stock", "na", "refunded", "wait"}
 VALID_ROLES = {"owner", "staff", "telecaller", "packer", "accounts"}
 
 app = Flask(__name__)
@@ -171,6 +171,7 @@ def init_db():
         ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS order_id TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_amount NUMERIC;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS balance_due NUMERIC;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS amount_to_receive NUMERIC;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_type TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_at TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS packed BOOLEAN NOT NULL DEFAULT false;
@@ -941,6 +942,9 @@ def api_orders():
     if status_filter == "trash" and session.get("role") != "owner":
         return jsonify({"error": "Only the owner can view Trash"}), 403
 
+    if status_filter == "refunded" and session.get("role") != "owner":
+        return jsonify({"error": "Only the owner can view Refunded items"}), 403
+
     # created_at is stored as ISO-8601 text (as it comes from Shopify), so
     # cast it to a date for the range comparison rather than a string match.
     query = "SELECT * FROM orders WHERE 1=1"
@@ -1271,6 +1275,24 @@ def api_order_invoice(order_id):
                 pass
         order_dict["balance_due"] = max(0.0, float(order_dict["balance_due"]) - na_value)
 
+    # Persist the final calculated Amount to be Received into Supabase at
+    # the moment it's locked in for the invoice — same reasoning as the
+    # invoice number itself being locked in on first print. COD orders get
+    # the real figure; everything else (already paid) stores nothing.
+    if order_dict.get("payment_type") == "cod":
+        if order_dict.get("balance_due") is not None:
+            final_amount_to_receive = float(order_dict["balance_due"])
+        else:
+            total_incl = sum(float(i["price"] or 0) * (i["quantity"] or 0) for i in billing_items)
+            final_amount_to_receive = round(total_incl + float(order_dict.get("shipping_amount") or 0), 2)
+        save_cur = db.cursor()
+        save_cur.execute(
+            "UPDATE orders SET amount_to_receive = %s WHERE shopify_order_id = %s",
+            (final_amount_to_receive, order_id),
+        )
+        db.commit()
+        save_cur.close()
+
     pdf_buf = build_invoice_pdf(order_dict, [dict(i) for i in billing_items], invoice_number, invoice_date)
     filename = invoice_number.replace("/", "-") + ".pdf"
     response = send_file(pdf_buf, mimetype="application/pdf", as_attachment=False, download_name=filename)
@@ -1362,6 +1384,9 @@ def api_update_item_status(item_id):
     status = data.get("status")
     if status not in VALID_STATUSES:
         return jsonify({"error": f"status must be one of {sorted(VALID_STATUSES)}"}), 400
+
+    if status == "refunded" and session.get("role") != "owner":
+        return jsonify({"error": "Only the owner can mark an item as Refunded"}), 403
 
     db = get_db()
     cur = db.cursor()

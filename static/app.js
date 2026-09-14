@@ -3,6 +3,8 @@ const STATUS_LABELS = {
   purchased: "Purchased",
   stock: "In Stock",
   na: "N/A",
+  refunded: "Refunded",
+  wait: "Wait",
 };
 
 const ROLE_LABELS = {
@@ -80,6 +82,7 @@ const closeAccountBtn = document.getElementById("closeAccountBtn");
 
 const usersBtn = document.getElementById("usersBtn");
 const trashBtn = document.getElementById("trashBtn");
+const refundedFilterBtn = document.getElementById("refundedFilterBtn");
 const usersModal = document.getElementById("usersModal");
 const usersTableBody = document.getElementById("usersTableBody");
 const newUserName = document.getElementById("newUserName");
@@ -124,6 +127,7 @@ async function loadMe() {
   usersBtn.hidden = !isOwner;
   activityLogBtn.hidden = !isOwner;
   trashBtn.hidden = !isOwner;
+  refundedFilterBtn.hidden = !isOwner;
 
   if (currentRole === "accounts") {
     // Accounts only ever needs the Billing view (what's ready to invoice,
@@ -396,6 +400,7 @@ function renderItemRow(item) {
   const pills = document.createElement("div");
   pills.className = "status-pills";
   for (const status of Object.keys(STATUS_LABELS)) {
+    if (status === "refunded" && currentRole !== "owner") continue;
     const pill = document.createElement("button");
     pill.className = "pill";
     pill.dataset.status = status;

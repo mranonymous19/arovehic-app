@@ -14,6 +14,10 @@
   --blue-bg: #dfe9f2;
   --gray-bg: #e9e7e0;
   --gray: #57544c;
+  --red: #b23b3b;
+  --red-bg: #f6dede;
+  --purple: #6b4fa0;
+  --purple-bg: #ece5f5;
   --focus: #d9611a;
 }
 
@@ -368,6 +372,8 @@ main {
 .pill[data-status="purchased"].active { background: var(--green-bg); color: var(--green); border-color: var(--green); }
 .pill[data-status="stock"].active { background: var(--blue-bg); color: var(--blue); border-color: var(--blue); }
 .pill[data-status="na"].active { background: var(--gray-bg); color: var(--gray); border-color: var(--gray); }
+.pill[data-status="refunded"].active { background: var(--red-bg); color: var(--red); border-color: var(--red); }
+.pill[data-status="wait"].active { background: var(--purple-bg); color: var(--purple); border-color: var(--purple); }
 
 .pill-readonly {
   cursor: default;
