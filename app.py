@@ -336,6 +336,17 @@ def packer_or_owner_required(f):
     return wrapper
 
 
+def accounts_or_owner_required(f):
+    @wraps(f)
+    @login_required
+    def wrapper(*args, **kwargs):
+        if session.get("role") not in ("owner", "accounts"):
+            return jsonify({"error": "Only accounts or owner accounts can print invoices"}), 403
+        return f(*args, **kwargs)
+
+    return wrapper
+
+
 # ---------------------------------------------------------------------------
 # Routes - pages
 # ---------------------------------------------------------------------------
@@ -1195,7 +1206,7 @@ def api_export_pending_orders():
 
 
 @app.route("/api/orders/<order_id>/invoice.pdf", methods=["GET"])
-@login_required
+@accounts_or_owner_required
 def api_order_invoice(order_id):
     db = get_db()
     cur = db.cursor()

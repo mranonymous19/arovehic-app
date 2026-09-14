@@ -309,16 +309,17 @@ function renderOrders(orders) {
     const assignedTo = order.assigned_to
       ? `<span class="assigned-to">Assigned: ${escapeHtml(order.assigned_to)}</span>`
       : "";
-    const showInvoiceBtn = currentFilter === "billing";
-    const invoiceBadge = showInvoiceBtn
+    const showInvoiceInfo = currentFilter === "billing";
+    const canPrintInvoice = showInvoiceInfo && (currentRole === "owner" || currentRole === "accounts");
+    const invoiceBadge = showInvoiceInfo
       ? (order.invoice_number
           ? `<span class="invoice-badge invoice-badge-printed">Invoice Printed · ${escapeHtml(order.invoice_number)}</span>`
           : `<span class="invoice-badge invoice-badge-not-printed">Not Printed</span>`)
       : "";
-    const amountBadge = (showInvoiceBtn && order.payment_type === "cod" && order.amount_to_receive != null)
+    const amountBadge = (showInvoiceInfo && order.payment_type === "cod" && order.amount_to_receive != null)
       ? `<span class="invoice-badge amount-to-receive-badge">To Receive · ₹${Number(order.amount_to_receive).toFixed(2)}</span>`
       : "";
-    const billedDateBadge = (showInvoiceBtn && order.billed_at)
+    const billedDateBadge = (showInvoiceInfo && order.billed_at)
       ? `<span class="invoice-badge billed-date-badge">Billed · ${new Date(order.billed_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</span>`
       : "";
     const billingEligible = (order.items || []).some((i) => i.status === "purchased" || i.status === "stock");
@@ -340,7 +341,7 @@ function renderOrders(orders) {
       </span>
       <span class="order-head-actions">
         ${canPack ? `<label class="order-packed-checkbox"><input type="checkbox" class="order-packed-input" ${order.packed ? "checked" : ""} /> Packed</label>` : ""}
-        ${showInvoiceBtn ? `<button type="button" class="btn btn-ghost btn-small order-invoice-link" data-order-id="${escapeHtml(order.order_id)}">${order.invoice_number ? "Reprint Invoice" : "Print Invoice"}</button>` : ""}
+        ${canPrintInvoice ? `<button type="button" class="btn btn-ghost btn-small order-invoice-link" data-order-id="${escapeHtml(order.order_id)}">${order.invoice_number ? "Reprint Invoice" : "Print Invoice"}</button>` : ""}
         ${currentRole === "owner" ? `<button type="button" class="order-history-link" data-order-id="${escapeHtml(order.order_id)}">History</button>` : ""}
         ${currentRole === "owner" && currentFilter === "trash" ? `<button type="button" class="btn btn-primary btn-small order-restore-link" data-order-id="${escapeHtml(order.order_id)}">Restore</button>` : ""}
         ${currentRole === "owner" && currentFilter !== "trash" ? `<button type="button" class="btn btn-ghost btn-small btn-danger order-delete-link" data-order-id="${escapeHtml(order.order_id)}">Delete</button>` : ""}
@@ -351,7 +352,7 @@ function renderOrders(orders) {
         updateOrderPacked(order.order_id, e.target.checked, e.target);
       });
     }
-    if (showInvoiceBtn) {
+    if (canPrintInvoice) {
       head.querySelector(".order-invoice-link").addEventListener("click", (e) => {
         printInvoice(order.order_id, e.currentTarget);
       });
