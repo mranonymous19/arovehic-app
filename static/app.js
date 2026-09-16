@@ -121,7 +121,7 @@ async function loadMe() {
   accountRole.textContent = ROLE_LABELS[currentRole] || currentRole;
 
   const isOwner = currentRole === "owner";
-  syncBtn.hidden = !isOwner;
+  syncBtn.hidden = !(isOwner || currentRole === "staff");
   pasteOrderBtn.hidden = !(isOwner || currentRole === "telecaller");
   settingsBtn.hidden = !isOwner;
   usersBtn.hidden = !isOwner;

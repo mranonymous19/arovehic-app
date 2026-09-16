@@ -636,7 +636,7 @@ def api_save_schedule_settings():
 # ---------------------------------------------------------------------------
 
 @app.route("/api/sync", methods=["POST"])
-@owner_required
+@staff_or_owner_required
 def api_sync():
     webhook_url = get_setting("n8n_webhook_url")
     if not webhook_url:
