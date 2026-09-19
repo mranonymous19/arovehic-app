@@ -85,6 +85,9 @@ def normalize_mobile(phone):
 
 def party_ledger_name(order):
     mobile = normalize_mobile(order.get("customer_phone"))
+    name = re.sub(r"\s+", " ", (order.get("customer_name") or "").strip())
+    if mobile and name:
+        return f"{name} - {mobile}"
     if mobile:
         return mobile
     # No usable number: fall back to the order number so the ledger name is never blank.
