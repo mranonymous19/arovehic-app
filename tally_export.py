@@ -123,11 +123,16 @@ def compute_invoice(order, items):
         name = (title + " " + variant).strip() or "Item"
         lines.append(f"{name} x{qty}")
 
-        # Per-item taxable (GST-exclusive) amount and rate, rounded to the paisa
-        # so the stock-item line in Tally matches exactly what's shown on screen.
-        line_base = round(line_incl / (1 + GST_RATE), 2)
+        # Per-item taxable (GST-exclusive) rate and amount. Tally recomputes each
+        # stock line as Rate x Qty on import rather than trusting our AMOUNT tag,
+        # so rate must be rounded FIRST and amount derived from that rounded rate
+        # (never rounded independently) or the two can differ by a paisa and Tally
+        # rejects the voucher with "Mismatch in total amount between Credit and
+        # Debit entries."
+        line_base_raw = line_incl / (1 + GST_RATE)
+        rate = round(line_base_raw / qty, 2) if qty else 0.0
+        line_base = round(rate * qty, 2)
         total_base += line_base
-        rate = round(line_base / qty, 2) if qty else 0.0
         item_entries.append({"name": name, "qty": qty, "rate": rate, "amount": line_base})
 
     total_base = round(total_base, 2)
