@@ -18,6 +18,7 @@ from flask import Flask, g, jsonify, redirect, render_template, request, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from invoice import build_invoice_pdf
+import tally_export
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 VALID_STATUSES = {"pending", "purchased", "stock", "na", "refunded", "wait"}
@@ -179,6 +180,7 @@ def init_db():
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS packed_at TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_number TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_date TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS tally_exported_at TEXT;
         """
     )
     # Migration: tables created before the 'packer'/'accounts' roles existed
@@ -1314,6 +1316,148 @@ def api_order_invoice(order_id):
     response.headers["X-Invoice-Date"] = invoice_date
     response.headers["Access-Control-Expose-Headers"] = "X-Invoice-Number, X-Invoice-Date"
     return response
+
+
+# ---------------------------------------------------------------------------
+# Tally Prime export — invoices in a date range, as Tally XML or Excel
+# ---------------------------------------------------------------------------
+
+def _collect_invoices_for_tally(date_from, date_to, only_new):
+    """Orders that already have an invoice number, filtered by INVOICE date
+    (stored as text like '14-Aug-26', so parsed here), returned as
+    [(order_dict, billing_items, payment_type)] sorted by invoice date/number."""
+    db = get_db()
+    cur = db.cursor()
+    query = "SELECT * FROM orders WHERE deleted_at IS NULL AND invoice_number IS NOT NULL AND invoice_number <> ''"
+    if only_new:
+        query += " AND (tally_exported_at IS NULL OR tally_exported_at = '')"
+    cur.execute(query)
+    orders = cur.fetchall()
+
+    d_from = datetime.strptime(date_from, "%Y-%m-%d") if date_from else None
+    d_to = datetime.strptime(date_to, "%Y-%m-%d") if date_to else None
+    picked = []
+    for o in orders:
+        dt = tally_export.parse_invoice_date(o["invoice_date"])
+        if dt is None:
+            continue
+        if d_from and dt < d_from:
+            continue
+        if d_to and dt > d_to:
+            continue
+        picked.append((dt, o))
+
+    ids = [o["shopify_order_id"] for _, o in picked]
+    items_by_order = {oid: [] for oid in ids}
+    if ids:
+        cur.execute(
+            "SELECT * FROM items WHERE shopify_order_id = ANY(%s) ORDER BY sort_order", (ids,)
+        )
+        for it in cur.fetchall():
+            items_by_order[it["shopify_order_id"]].append(it)
+    cur.close()
+
+    cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
+    picked.sort(key=lambda p: (p[0], p[1]["invoice_number"]))
+    result = []
+    for dt, o in picked:
+        billing_items = [dict(i) for i in items_by_order.get(o["shopify_order_id"], [])
+                         if i["status"] in ("purchased", "stock")]
+        if not billing_items:
+            continue
+        result.append((dict(o), billing_items, resolve_payment_type(o, cod_threshold) or "prepaid"))
+    return result
+
+
+def _tally_export_args():
+    date_from = request.args.get("date_from") or ""
+    date_to = request.args.get("date_to") or ""
+    only_new = request.args.get("only_new") == "1"
+    company = (request.args.get("company") or "").strip()
+    try:
+        invoices = _collect_invoices_for_tally(date_from, date_to, only_new)
+    except ValueError:
+        return None, None, None, (jsonify({"error": "Dates must be YYYY-MM-DD"}), 400)
+    if not invoices:
+        msg = "No invoices found in that date range."
+        if only_new:
+            msg = "No new invoices in that range (already exported ones are skipped)."
+        return None, None, None, (jsonify({"error": msg}), 404)
+    return tally_export.build_records(invoices), only_new, company, None
+
+
+def _mark_tally_exported(records):
+    ids = [r["order"]["shopify_order_id"] for r in records]
+    db = get_db()
+    cur = db.cursor()
+    cur.execute(
+        "UPDATE orders SET tally_exported_at = %s WHERE shopify_order_id = ANY(%s)",
+        (datetime.now(timezone.utc).isoformat(), ids),
+    )
+    db.commit()
+    cur.close()
+
+
+def _tally_filename(ext):
+    date_from = request.args.get("date_from") or "start"
+    date_to = request.args.get("date_to") or "now"
+    return f"tally_invoices_{date_from}_to_{date_to}.{ext}"
+
+
+@app.route("/api/invoices/export/tally.xml", methods=["GET"])
+@accounts_or_owner_required
+def api_export_tally_xml():
+    records, only_new, company, err = _tally_export_args()
+    if err:
+        return err
+    xml = tally_export.build_tally_xml(records, company)
+    if only_new:
+        _mark_tally_exported(records)
+    resp = app.response_class(xml.encode("utf-8"), mimetype="application/xml")
+    resp.headers["Content-Disposition"] = f'attachment; filename="{_tally_filename("xml")}"'
+    resp.headers["X-Invoice-Count"] = str(len(records))
+    resp.headers["Access-Control-Expose-Headers"] = "X-Invoice-Count"
+    return resp
+
+
+@app.route("/api/invoices/export/tally.xlsx", methods=["GET"])
+@accounts_or_owner_required
+def api_export_tally_xlsx():
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    records, only_new, _company, err = _tally_export_args()
+    if err:
+        return err
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Invoices"
+    ws.append(tally_export.EXCEL_HEADERS)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for row in tally_export.excel_rows(records):
+        ws.append(row)
+    # Mobile numbers must stay text, or Excel turns them into 9.8E+09.
+    for row in ws.iter_rows(min_row=2, min_col=5, max_col=5):
+        for cell in row:
+            cell.number_format = "@"
+    for col, w in zip("ABCDEFGHIJKLMNOPQ", (12, 18, 12, 12, 16, 22, 40, 16, 16, 10, 12, 50, 14, 12, 14, 10, 14)):
+        ws.column_dimensions[col].width = w
+    if only_new:
+        _mark_tally_exported(records)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    resp = send_file(
+        buf,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=_tally_filename("xlsx"),
+    )
+    resp.headers["X-Invoice-Count"] = str(len(records))
+    resp.headers["Access-Control-Expose-Headers"] = "X-Invoice-Count"
+    return resp
 
 
 @app.route("/api/orders/<order_id>", methods=["DELETE"])

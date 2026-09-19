@@ -51,6 +51,13 @@
     <input id="dateToInput" type="date" class="date-filter-input">
     <button id="clearDateFilterBtn" class="btn btn-ghost btn-small" hidden>Clear dates</button>
     <button id="exportPendingBtn" class="btn btn-ghost btn-small" hidden>Export Pending (Excel)</button>
+    <span id="tallyExportGroup" class="tally-export-group" hidden>
+      <button id="exportTallyXmlBtn" class="btn btn-ghost btn-small">Tally XML</button>
+      <button id="exportTallyXlsxBtn" class="btn btn-ghost btn-small">Tally Excel</button>
+      <label class="date-filter-label tally-only-new" title="Skip invoices already exported, and mark these as exported">
+        <input id="tallyOnlyNew" type="checkbox"> Only new
+      </label>
+    </span>
 
     <span class="filter-divider"></span>
 

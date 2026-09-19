@@ -42,6 +42,10 @@ const dateFromInput = document.getElementById("dateFromInput");
 const dateToInput = document.getElementById("dateToInput");
 const clearDateFilterBtn = document.getElementById("clearDateFilterBtn");
 const exportPendingBtn = document.getElementById("exportPendingBtn");
+const tallyExportGroup = document.getElementById("tallyExportGroup");
+const exportTallyXmlBtn = document.getElementById("exportTallyXmlBtn");
+const exportTallyXlsxBtn = document.getElementById("exportTallyXlsxBtn");
+const tallyOnlyNew = document.getElementById("tallyOnlyNew");
 
 const codThresholdInput = document.getElementById("codThresholdInput");
 const codStaffList = document.getElementById("codStaffList");
@@ -140,6 +144,8 @@ async function loadMe() {
     filterButtons.forEach((b) => b.classList.toggle("active", b.dataset.status === "billing"));
     invoiceFilterRow.hidden = false;
   }
+
+  updateTallyExportVisibility();
 
   if (currentRole === "packer") {
     // A packer only ever needs Billing orders whose invoice has already
@@ -647,6 +653,7 @@ filterButtons.forEach((btn) => {
       invoiceFilterButtons.forEach((b) => b.classList.toggle("active", b.dataset.invoice === ""));
     }
     exportPendingBtn.hidden = currentFilter !== "pending";
+    updateTallyExportVisibility();
     loadOrders();
   });
 });
@@ -671,6 +678,7 @@ invoiceFilterButtons.forEach((btn) => {
 
 trashBtn.addEventListener("click", () => {
   currentFilter = "trash";
+  updateTallyExportVisibility();
   currentInvoiceFilter = "";
   filterButtons.forEach((b) => b.classList.remove("active"));
   invoiceFilterRow.hidden = true;
@@ -705,6 +713,59 @@ clearDateFilterBtn.addEventListener("click", () => {
   updateClearDateFilterVisibility();
   loadOrders();
 });
+
+// ---------------------------------------------------------------------------
+// Tally Prime export (owner / accounts, Billing view). Uses the From/To dates
+// above, filtered by INVOICE date. Downloads via fetch so errors (e.g. "no
+// invoices in that range") show as a message instead of a blank JSON page.
+// ---------------------------------------------------------------------------
+
+function updateTallyExportVisibility() {
+  tallyExportGroup.hidden = !(
+    currentFilter === "billing" && (currentRole === "owner" || currentRole === "accounts")
+  );
+}
+
+async function downloadTally(kind, buttonEl) {
+  const params = new URLSearchParams();
+  if (currentDateFrom) params.set("date_from", currentDateFrom);
+  if (currentDateTo) params.set("date_to", currentDateTo);
+  if (tallyOnlyNew.checked) params.set("only_new", "1");
+
+  const original = buttonEl.textContent;
+  buttonEl.disabled = true;
+  buttonEl.textContent = "Preparing…";
+  try {
+    const res = await fetch(`/api/invoices/export/tally.${kind}?${params.toString()}`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      showMessage(data.error || "Could not create the Tally export.", true);
+      return;
+    }
+    const count = res.headers.get("X-Invoice-Count");
+    const blob = await res.blob();
+    const disposition = res.headers.get("Content-Disposition") || "";
+    const match = /filename="?([^";]+)"?/.exec(disposition);
+    const filename = match ? match[1] : `tally_invoices.${kind}`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    showMessage(`Exported ${count || ""} invoice(s) to ${kind.toUpperCase()}.`, false);
+  } catch (err) {
+    showMessage("Could not reach the server for the Tally export.", true);
+  } finally {
+    buttonEl.disabled = false;
+    buttonEl.textContent = original;
+  }
+}
+
+exportTallyXmlBtn.addEventListener("click", (e) => downloadTally("xml", e.currentTarget));
+exportTallyXlsxBtn.addEventListener("click", (e) => downloadTally("xlsx", e.currentTarget));
 
 exportPendingBtn.addEventListener("click", () => {
   const params = new URLSearchParams();
