@@ -33,6 +33,7 @@ DELIVERY_LEDGER = os.environ.get("TALLY_DELIVERY_LEDGER", "Delivery Charges")
 ROUNDOFF_LEDGER = os.environ.get("TALLY_ROUNDOFF_LEDGER", "Round Off")
 VOUCHER_TYPE = os.environ.get("TALLY_VOUCHER_TYPE", "Sales")
 DEFAULT_COMPANY = os.environ.get("TALLY_COMPANY_NAME", "")
+UOM = os.environ.get("TALLY_UOM", "nos")  # unit of measure shown against each item's qty/rate
 
 # Tally's own spelling for the few states that differ from common usage.
 _TALLY_STATE_NAMES = {
@@ -111,18 +112,27 @@ def compute_invoice(order, items):
     total_incl = 0.0
     total_base = 0.0
     lines = []
+    item_entries = []
     for it in items:
         qty = int(it.get("quantity") or 1)
         unit_incl = float(it.get("price") or 0)
         line_incl = unit_incl * qty
         total_incl += line_incl
-        total_base += line_incl / (1 + GST_RATE)
         title = it.get("title") or ""
         variant = it.get("variant_title") or ""
-        lines.append(f"{(title + ' ' + variant).strip()} x{qty}")
+        name = (title + " " + variant).strip() or "Item"
+        lines.append(f"{name} x{qty}")
 
+        # Per-item taxable (GST-exclusive) amount and rate, rounded to the paisa
+        # so the stock-item line in Tally matches exactly what's shown on screen.
+        line_base = round(line_incl / (1 + GST_RATE), 2)
+        total_base += line_base
+        rate = round(line_base / qty, 2) if qty else 0.0
+        item_entries.append({"name": name, "qty": qty, "rate": rate, "amount": line_base})
+
+    total_base = round(total_base, 2)
     igst = round(total_base * GST_RATE, 2)
-    sales = round(total_base, 2)
+    sales = total_base
     delivery = round(float(order.get("shipping_amount") or 0), 2)
     grand_total = round(total_incl + delivery, 2)
     round_off = round(grand_total - (sales + igst + delivery), 2)
@@ -133,6 +143,7 @@ def compute_invoice(order, items):
         "round_off": round_off,
         "grand_total": grand_total,
         "lines": lines,
+        "items": item_entries,
     }
 
 
@@ -176,6 +187,26 @@ def _ledger_master(name, parent, extra=""):
     )
 
 
+def _unit_master(unit):
+    return (
+        '<TALLYMESSAGE xmlns:UDF="TallyUDF">'
+        f'<UNIT NAME="{x(unit)}" ACTION="Create">'
+        f"<NAME>{x(unit)}</NAME>"
+        "<ISSIMPLEUNIT>Yes</ISSIMPLEUNIT>"
+        "</UNIT></TALLYMESSAGE>"
+    )
+
+
+def _stock_item_master(name, unit):
+    return (
+        '<TALLYMESSAGE xmlns:UDF="TallyUDF">'
+        f'<STOCKITEM NAME="{x(name)}" ACTION="Create">'
+        f"<NAME.LIST><NAME>{x(name)}</NAME></NAME.LIST>"
+        f"<BASEUNITS>{x(unit)}</BASEUNITS>"
+        "</STOCKITEM></TALLYMESSAGE>"
+    )
+
+
 def _customer_master(rec):
     since = fy_start(rec["dt"])
     addr = "".join(f"<ADDRESS>{x(a)}</ADDRESS>" for a in rec["address_lines"])
@@ -215,6 +246,26 @@ def _entry(name, amount, party=False):
     )
 
 
+def _inventory_entry(item):
+    """One stock-item line (Name of Item / Qty / Rate / Amount), allocated to Sales."""
+    qty_unit = f"{item['qty']} {UOM}"
+    return (
+        "<ALLINVENTORYENTRIES.LIST>"
+        f"<STOCKITEMNAME>{x(item['name'])}</STOCKITEMNAME>"
+        "<ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>"
+        f"<RATE>{amt(item['rate'])}/{x(UOM)}</RATE>"
+        f"<AMOUNT>{amt(item['amount'])}</AMOUNT>"
+        f"<ACTUALQTY>{x(qty_unit)}</ACTUALQTY>"
+        f"<BILLEDQTY>{x(qty_unit)}</BILLEDQTY>"
+        "<ACCOUNTINGALLOCATIONS.LIST>"
+        f"<LEDGERNAME>{x(SALES_LEDGER)}</LEDGERNAME>"
+        "<ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>"
+        f"<AMOUNT>{amt(item['amount'])}</AMOUNT>"
+        "</ACCOUNTINGALLOCATIONS.LIST>"
+        "</ALLINVENTORYENTRIES.LIST>"
+    )
+
+
 def _voucher(rec):
     date = rec["dt"].strftime("%Y%m%d")
     narration = f"Order {rec['order_name']} | {rec['payment_type']} | " + "; ".join(rec["lines"])
@@ -228,7 +279,10 @@ def _voucher(rec):
             f"<CONSIGNEESTATENAME>{state}</CONSIGNEESTATENAME>"
         )
 
-    entries = [_entry(rec["ledger"], -rec["grand_total"], party=True), _entry(SALES_LEDGER, rec["sales"])]
+    # Party/GST/Delivery/Round-off stay as plain ledger entries; each stock item's
+    # own share of the taxable value is allocated inside its ALLINVENTORYENTRIES
+    # block instead of a single lump "Sales" line.
+    entries = [_entry(rec["ledger"], -rec["grand_total"], party=True)]
     if rec["igst"]:
         entries.append(_entry(IGST_LEDGER, rec["igst"]))
     if rec["delivery"]:
@@ -236,9 +290,11 @@ def _voucher(rec):
     if rec["round_off"]:
         entries.append(_entry(ROUNDOFF_LEDGER, rec["round_off"]))
 
+    inv_entries = [_inventory_entry(it) for it in rec["items"]]
+
     return (
         '<TALLYMESSAGE xmlns:UDF="TallyUDF">'
-        f'<VOUCHER VCHTYPE="{x(VOUCHER_TYPE)}" ACTION="Create" OBJVIEW="Accounting Invoice View">'
+        f'<VOUCHER VCHTYPE="{x(VOUCHER_TYPE)}" ACTION="Create" OBJVIEW="Invoice Voucher View">'
         f"<DATE>{date}</DATE>"
         f"<EFFECTIVEDATE>{date}</EFFECTIVEDATE>"
         f"<VOUCHERTYPENAME>{x(VOUCHER_TYPE)}</VOUCHERTYPENAME>"
@@ -253,8 +309,9 @@ def _voucher(rec):
         "<COUNTRYOFRESIDENCE>India</COUNTRYOFRESIDENCE>"
         "<GSTREGISTRATIONTYPE>Unregistered/Consumer</GSTREGISTRATIONTYPE>"
         "<ISINVOICE>Yes</ISINVOICE>"
-        "<PERSISTEDVIEW>Accounting Invoice View</PERSISTEDVIEW>"
+        "<PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>"
         f"<NARRATION>{x(narration[:1000])}</NARRATION>"
+        + "".join(inv_entries)
         + "".join(entries)
         + "</VOUCHER></TALLYMESSAGE>"
     )
@@ -265,6 +322,7 @@ def build_tally_xml(records, company=""):
     company_tag = f"<SVCURRENTCOMPANY>{x(company)}</SVCURRENTCOMPANY>" if company else ""
 
     masters = [
+        _unit_master(UOM),
         _ledger_master(SALES_LEDGER, "Sales Accounts"),
         _ledger_master(
             IGST_LEDGER,
@@ -277,6 +335,13 @@ def build_tally_xml(records, company=""):
         masters.append(_ledger_master(DELIVERY_LEDGER, "Sales Accounts"))
     if any(r["round_off"] for r in records):
         masters.append(_ledger_master(ROUNDOFF_LEDGER, "Indirect Expenses"))
+
+    seen_items = set()
+    for rec in records:
+        for it in rec["items"]:
+            if it["name"] not in seen_items:
+                seen_items.add(it["name"])
+                masters.append(_stock_item_master(it["name"], UOM))
 
     seen = set()
     for rec in records:
