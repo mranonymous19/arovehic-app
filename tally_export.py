@@ -287,10 +287,16 @@ def _voucher(rec):
             f"<CONSIGNEESTATENAME>{state}</CONSIGNEESTATENAME>"
         )
 
-    # Party/GST/Delivery/Round-off stay as plain ledger entries; each stock item's
-    # own share of the taxable value is allocated inside its ALLINVENTORYENTRIES
-    # block instead of a single lump "Sales" line.
+    # Party/GST/Delivery/Round-off are plain top-level ledger entries. Each stock
+    # item ALSO carries its own share of the taxable value inside its
+    # ALLINVENTORYENTRIES ACCOUNTINGALLOCATIONS block (needed for per-item detail
+    # and stock tracking) — but Tally's own credit/debit balance check for this
+    # voucher view only sums ALLLEDGERENTRIES.LIST, so the aggregate Sales amount
+    # must ALSO appear here as its own line, or every voucher comes up short by
+    # exactly its taxable value ("Mismatch in total amount between Credit and
+    # Debit entries").
     entries = [_entry(rec["ledger"], -rec["grand_total"], party=True)]
+    entries.append(_entry(SALES_LEDGER, rec["sales"]))
     if rec["igst"]:
         entries.append(_entry(IGST_LEDGER, rec["igst"]))
     if rec["delivery"]:
