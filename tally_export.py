@@ -12,6 +12,9 @@ Amount-only sales vouchers (no stock items). Each invoice becomes:
     Cr  Delivery Charges           delivery (if any)
     +/- Round Off                  only if the paise don't add up
 
+For an intra-state sale (customer in TALLY_HOME_STATE) the 18% is booked as
+CGST 9% + SGST 9% instead of IGST 18%.
+
 The customer ledger is named by the customer's 10-digit mobile number (same
 number always -> same ledger), with the real name as the mailing name. The XML
 also carries the ledger masters, so Tally creates missing ledgers on import.
@@ -29,11 +32,23 @@ from invoice import GST_RATE, gst_state_code
 
 SALES_LEDGER = os.environ.get("TALLY_SALES_LEDGER", "Sales")
 IGST_LEDGER = os.environ.get("TALLY_IGST_LEDGER", "Output IGST 18%")
+CGST_LEDGER = os.environ.get("TALLY_CGST_LEDGER", "Output CGST 9%")
+SGST_LEDGER = os.environ.get("TALLY_SGST_LEDGER", "Output SGST 9%")
 DELIVERY_LEDGER = os.environ.get("TALLY_DELIVERY_LEDGER", "Delivery Charges")
 ROUNDOFF_LEDGER = os.environ.get("TALLY_ROUNDOFF_LEDGER", "Round Off")
 VOUCHER_TYPE = os.environ.get("TALLY_VOUCHER_TYPE", "Sales")
 DEFAULT_COMPANY = os.environ.get("TALLY_COMPANY_NAME", "")
 UOM = os.environ.get("TALLY_UOM", "nos")  # unit of measure shown against each item's qty/rate
+# Your own state. When the customer is in this state the sale is intra-state, so
+# the tax splits into CGST + SGST. Leave blank to always charge IGST.
+HOME_STATE = os.environ.get("TALLY_HOME_STATE", "")
+HSN_CODE = os.environ.get("TALLY_HSN_CODE", "")  # optional; printed on the invoice
+
+# Tally's internal markers. The \x04 prefix is how Tally stores its own built-in
+# option names ("Applicable", "Any") -- a plain "Applicable" is read as a
+# user-defined value and the GST details are ignored.
+TALLY_APPLICABLE = "\u0004 Applicable"
+TALLY_ANY = "\u0004 Any"
 
 # Tally's own spelling for the few states that differ from common usage.
 _TALLY_STATE_NAMES = {
@@ -139,7 +154,10 @@ def compute_invoice(order, items):
         item_entries.append({"name": name, "qty": qty, "rate": rate, "amount": line_base})
 
     total_base = round(total_base, 2)
-    igst = round(total_base * GST_RATE, 2)
+    # Tax as (inclusive total - taxable value), not base x 18%. Deriving it this
+    # way means sales + tax always adds back to exactly what the app charged, so
+    # rounding never leaves a stray paisa for Tally to reject.
+    igst = round(round(total_incl, 2) - total_base, 2)
     sales = total_base
     delivery = round(float(order.get("shipping_amount") or 0), 2)
     grand_total = round(total_incl + delivery, 2)
@@ -172,6 +190,10 @@ def build_records(invoices):
                 "customer_name": (order.get("customer_name") or "").strip(),
                 "address_lines": [p.strip() for p in addr_parts if p and p.strip()],
                 "state": tally_state(order.get("shipping_state")),
+                "is_intrastate": bool(
+                    HOME_STATE
+                    and tally_state(order.get("shipping_state")).lower() == tally_state(HOME_STATE).lower()
+                ),
                 "pincode": (order.get("shipping_pincode") or "").strip(),
                 "payment_type": (payment_type or "prepaid").upper(),
                 **fig,
@@ -205,12 +227,38 @@ def _unit_master(unit):
     )
 
 
-def _stock_item_master(name, unit):
+def _stock_item_master(name, unit, since):
+    """Stock item carrying its GST rate, so the invoice never prints 0%."""
+    pct = GST_RATE * 100
+    half = pct / 2
+    rates = "".join(
+        "<RATEDETAILS.LIST>"
+        f"<GSTRATEDUTYHEAD>{head}</GSTRATEDUTYHEAD>"
+        "<GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE>"
+        f"<GSTRATE>{value:g}</GSTRATE>"
+        "</RATEDETAILS.LIST>"
+        for head, value in (
+            ("CGST", half), ("SGST/UTGST", half), ("IGST", pct), ("Cess", 0),
+        )
+    )
+    hsn = f"<HSNCODE>{x(HSN_CODE)}</HSNCODE>" if HSN_CODE else ""
     return (
         '<TALLYMESSAGE xmlns:UDF="TallyUDF">'
         f'<STOCKITEM NAME="{x(name)}" ACTION="Create">'
         f"<NAME.LIST><NAME>{x(name)}</NAME></NAME.LIST>"
         f"<BASEUNITS>{x(unit)}</BASEUNITS>"
+        f"<GSTAPPLICABLE>{x(TALLY_APPLICABLE)}</GSTAPPLICABLE>"
+        "<GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>"
+        "<GSTDETAILS.LIST>"
+        f"<APPLICABLEFROM>{since}</APPLICABLEFROM>"
+        f"{hsn}"
+        "<CALCULATIONTYPE>On Value</CALCULATIONTYPE>"
+        "<TAXABILITY>Taxable</TAXABILITY>"
+        "<STATEWISEDETAILS.LIST>"
+        f"<STATENAME>{x(TALLY_ANY)}</STATENAME>"
+        f"{rates}"
+        "</STATEWISEDETAILS.LIST>"
+        "</GSTDETAILS.LIST>"
         "</STOCKITEM></TALLYMESSAGE>"
     )
 
@@ -242,15 +290,21 @@ def _customer_master(rec):
 
 
 def _entry(name, amount, party=False):
-    """Credit entries carry a positive amount; the party (debit) carries a negative one."""
+    """Credit entries carry a positive amount; the party (debit) carries a negative one.
+
+    The tag is LEDGERENTRIES.LIST, not ALLLEDGERENTRIES.LIST. A voucher with
+    ISINVOICE=Yes / OBJVIEW="Invoice Voucher View" reads only LEDGERENTRIES.LIST
+    and silently discards the other one -- no error, the voucher just imports
+    with no party, no GST and no delivery charge.
+    """
     deemed = "Yes" if amount < 0 else "No"
     return (
-        "<ALLLEDGERENTRIES.LIST>"
+        "<LEDGERENTRIES.LIST>"
         f"<LEDGERNAME>{x(name)}</LEDGERNAME>"
         f"<ISDEEMEDPOSITIVE>{deemed}</ISDEEMEDPOSITIVE>"
         f"<ISPARTYLEDGER>{'Yes' if party else 'No'}</ISPARTYLEDGER>"
         f"<AMOUNT>{amt(amount)}</AMOUNT>"
-        "</ALLLEDGERENTRIES.LIST>"
+        "</LEDGERENTRIES.LIST>"
     )
 
 
@@ -287,18 +341,20 @@ def _voucher(rec):
             f"<CONSIGNEESTATENAME>{state}</CONSIGNEESTATENAME>"
         )
 
-    # Party/GST/Delivery/Round-off are plain top-level ledger entries. Each stock
-    # item ALSO carries its own share of the taxable value inside its
-    # ALLINVENTORYENTRIES ACCOUNTINGALLOCATIONS block (needed for per-item detail
-    # and stock tracking) — but Tally's own credit/debit balance check for this
-    # voucher view only sums ALLLEDGERENTRIES.LIST, so the aggregate Sales amount
-    # must ALSO appear here as its own line, or every voucher comes up short by
-    # exactly its taxable value ("Mismatch in total amount between Credit and
-    # Debit entries").
+    # Party, tax, delivery and round-off go in LEDGERENTRIES.LIST. Sales does NOT
+    # get a line here: each stock item already credits Sales through its own
+    # ACCOUNTINGALLOCATIONS block, and in invoice view Tally counts those toward
+    # the voucher total. Adding an aggregate Sales line as well double-counts the
+    # taxable value and the voucher is rejected for a credit/debit mismatch.
     entries = [_entry(rec["ledger"], -rec["grand_total"], party=True)]
-    entries.append(_entry(SALES_LEDGER, rec["sales"]))
     if rec["igst"]:
-        entries.append(_entry(IGST_LEDGER, rec["igst"]))
+        if rec["is_intrastate"]:
+            cgst = round(rec["igst"] / 2, 2)
+            sgst = round(rec["igst"] - cgst, 2)
+            entries.append(_entry(CGST_LEDGER, cgst))
+            entries.append(_entry(SGST_LEDGER, sgst))
+        else:
+            entries.append(_entry(IGST_LEDGER, rec["igst"]))
     if rec["delivery"]:
         entries.append(_entry(DELIVERY_LEDGER, rec["delivery"]))
     if rec["round_off"]:
@@ -335,16 +391,25 @@ def build_tally_xml(records, company=""):
     company = company or DEFAULT_COMPANY
     company_tag = f"<SVCURRENTCOMPANY>{x(company)}</SVCURRENTCOMPANY>" if company else ""
 
+    since = fy_start(min(r["dt"] for r in records)) if records else fy_start(datetime.now())
+
+    def tax_ledger(name, duty_head, rate):
+        return _ledger_master(
+            name,
+            "Duties & Taxes",
+            f"<TAXTYPE>GST</TAXTYPE><GSTDUTYHEAD>{duty_head}</GSTDUTYHEAD>"
+            f"<RATEOFTAXCALCULATION>{rate:g}</RATEOFTAXCALCULATION>",
+        )
+
     masters = [
         _unit_master(UOM),
         _ledger_master(SALES_LEDGER, "Sales Accounts"),
-        _ledger_master(
-            IGST_LEDGER,
-            "Duties & Taxes",
-            "<TAXTYPE>GST</TAXTYPE><GSTDUTYHEAD>Integrated Tax</GSTDUTYHEAD>"
-            f"<RATEOFTAXCALCULATION>{int(GST_RATE * 100)}</RATEOFTAXCALCULATION>",
-        ),
     ]
+    if any(not r["is_intrastate"] for r in records):
+        masters.append(tax_ledger(IGST_LEDGER, "Integrated Tax", GST_RATE * 100))
+    if any(r["is_intrastate"] for r in records):
+        masters.append(tax_ledger(CGST_LEDGER, "Central Tax", GST_RATE * 50))
+        masters.append(tax_ledger(SGST_LEDGER, "State Tax", GST_RATE * 50))
     if any(r["delivery"] for r in records):
         masters.append(_ledger_master(DELIVERY_LEDGER, "Sales Accounts"))
     if any(r["round_off"] for r in records):
@@ -355,7 +420,7 @@ def build_tally_xml(records, company=""):
         for it in rec["items"]:
             if it["name"] not in seen_items:
                 seen_items.add(it["name"])
-                masters.append(_stock_item_master(it["name"], UOM))
+                masters.append(_stock_item_master(it["name"], UOM, since))
 
     seen = set()
     for rec in records:
@@ -381,10 +446,13 @@ def build_tally_xml(records, company=""):
 # Excel
 # ---------------------------------------------------------------------------
 
+_PCT = GST_RATE * 100
+
 EXCEL_HEADERS = [
     "Voucher Type", "Invoice Number", "Invoice Date", "Order ID", "Customer Ledger (Mobile)",
     "Customer Name", "Address", "City", "State", "Pincode", "Payment Type", "Items",
-    "Sales (Taxable)", f"IGST {int(GST_RATE * 100)}%", "Delivery Charge", "Round Off", "Invoice Total",
+    "Sales (Taxable)", f"CGST {_PCT / 2:g}%", f"SGST {_PCT / 2:g}%", f"IGST {_PCT:g}%",
+    "Delivery Charge", "Round Off", "Invoice Total",
 ]
 
 
@@ -393,12 +461,19 @@ def excel_rows(records):
     for r in records:
         o = r["order"]
         addr = ", ".join(p for p in [o.get("shipping_address1"), o.get("shipping_address2")] if p)
+        if r["is_intrastate"]:
+            cgst = round(r["igst"] / 2, 2)
+            sgst = round(r["igst"] - cgst, 2)
+            igst = 0.0
+        else:
+            cgst = sgst = 0.0
+            igst = r["igst"]
         rows.append(
             [
                 VOUCHER_TYPE, r["invoice_number"], r["dt"].strftime("%d-%m-%Y"), r["order_name"], r["ledger"],
                 r["customer_name"], addr, o.get("shipping_city") or "", r["state"], r["pincode"],
                 r["payment_type"], "; ".join(r["lines"]),
-                r["sales"], r["igst"], r["delivery"], r["round_off"], r["grand_total"],
+                r["sales"], cgst, sgst, igst, r["delivery"], r["round_off"], r["grand_total"],
             ]
         )
     return rows
