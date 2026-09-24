@@ -263,8 +263,10 @@ def log_activity(cur, item_id, item_name, action, details="", order_id=None):
 #   owner      - full control: sync, settings, status updates, manage users.
 #   staff      - can update item status only; only sees orders currently
 #                assigned to them (see /api/orders below).
-#   telecaller - view-only for orders/items, plus can add manual orders
-#                (they're the ones taking these calls).
+#   telecaller - view-only for orders/items (including Trash, Refunded,
+#                and Cancelled — same visibility as owner, just nothing is
+#                editable), plus can add manual orders (they're the ones
+#                taking these calls).
 #   packer     - can toggle the packed flag, or mark an order cancelled
 #                (with a reason) instead.
 #   accounts   - view-only, restricted to the Billing view: which orders
@@ -957,16 +959,19 @@ def api_orders():
         status_filter = "billing"
         invoice_filter = "printed"
 
-    if status_filter == "trash" and session.get("role") != "owner":
+    # Trash, Refunded, and Cancelled are otherwise-hidden views. Owner gets
+    # full access; telecaller can look but never edit (enforced by the
+    # role checks on every write endpoint below), so they can check any
+    # order's full history when helping a customer on the phone.
+    if status_filter == "trash" and session.get("role") not in ("owner", "telecaller"):
         return jsonify({"error": "Only the owner can view Trash"}), 403
 
-    if status_filter == "refunded" and session.get("role") != "owner":
+    if status_filter == "refunded" and session.get("role") not in ("owner", "telecaller"):
         return jsonify({"error": "Only the owner can view Refunded items"}), 403
 
     # Cancelled orders are their own view, same reasoning as Trash/Refunded
-    # above — only the owner gets a dedicated place to review every order a
-    # packer has cancelled.
-    if status_filter == "cancelled" and session.get("role") != "owner":
+    # above.
+    if status_filter == "cancelled" and session.get("role") not in ("owner", "telecaller"):
         return jsonify({"error": "Only the owner can view Cancelled orders"}), 403
 
     # created_at is stored as ISO-8601 text (as it comes from Shopify), so

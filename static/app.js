@@ -131,9 +131,12 @@ async function loadMe() {
   settingsBtn.hidden = !isOwner;
   usersBtn.hidden = !isOwner;
   activityLogBtn.hidden = !isOwner;
-  trashBtn.hidden = !isOwner;
-  cancelledBtn.hidden = !isOwner;
-  refundedFilterOption.hidden = !isOwner;
+  trashBtn.hidden = !(isOwner || currentRole === "telecaller");
+  cancelledBtn.hidden = !(isOwner || currentRole === "telecaller");
+  // Telecaller is otherwise view-only everywhere (every edit endpoint is
+  // gated server-side too), but gets the same visibility as the owner so
+  // they can pull up any order's full status while on a call.
+  refundedFilterOption.hidden = !(isOwner || currentRole === "telecaller");
 
   if (currentRole === "accounts") {
     // Accounts only ever needs the Billing view (what's ready to invoice,
@@ -337,9 +340,11 @@ function renderOrders(orders) {
     const packedReadonlyBadge = (!canTogglePacked() && order.packed)
       ? `<span class="invoice-badge packed-yes-badge">Packed</span>`
       : "";
-    // Cancellation info (that it happened, and why) is only ever shown to
-    // owner/packer accounts — never staff, telecaller, or accounts roles.
-    const cancelledBadge = (canTogglePacked() && order.cancelled)
+    // Cancellation info (that it happened, and why) is shown to owner,
+    // packer, and telecaller — telecaller can't act on it, but needs to
+    // see it to answer a customer's call about their order.
+    const canViewCancelInfo = canTogglePacked() || currentRole === "telecaller";
+    const cancelledBadge = (canViewCancelInfo && order.cancelled)
       ? `<span class="invoice-badge cancelled-badge" title="${escapeHtml(order.cancelled_reason || "")}">Cancelled${order.cancelled_reason ? ": " + escapeHtml(order.cancelled_reason) : ""}</span>`
       : "";
     head.innerHTML = `
@@ -436,7 +441,7 @@ function renderItemRow(item) {
   const pills = document.createElement("div");
   pills.className = "status-pills";
   for (const status of Object.keys(STATUS_LABELS)) {
-    if (status === "refunded" && currentRole !== "owner") continue;
+    if (status === "refunded" && currentRole !== "owner" && currentRole !== "telecaller") continue;
     const pill = document.createElement("button");
     pill.className = "pill";
     pill.dataset.status = status;
