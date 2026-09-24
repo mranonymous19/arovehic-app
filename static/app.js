@@ -34,7 +34,7 @@ const settingsModal = document.getElementById("settingsModal");
 const webhookInput = document.getElementById("webhookInput");
 const saveSettingsBtn = document.getElementById("saveSettingsBtn");
 const closeSettingsBtn = document.getElementById("closeSettingsBtn");
-const filterButtons = document.querySelectorAll(".filter-btn[data-status]");
+const statusFilterSelect = document.getElementById("statusFilterSelect");
 const paymentFilterButtons = document.querySelectorAll(".filter-btn[data-payment]");
 const invoiceFilterRow = document.getElementById("invoiceFilterRow");
 const invoiceFilterButtons = document.querySelectorAll(".filter-btn[data-invoice]");
@@ -86,7 +86,8 @@ const closeAccountBtn = document.getElementById("closeAccountBtn");
 
 const usersBtn = document.getElementById("usersBtn");
 const trashBtn = document.getElementById("trashBtn");
-const refundedFilterBtn = document.getElementById("refundedFilterBtn");
+const cancelledBtn = document.getElementById("cancelledBtn");
+const refundedFilterOption = document.getElementById("refundedFilterOption");
 const usersModal = document.getElementById("usersModal");
 const usersTableBody = document.getElementById("usersTableBody");
 const newUserName = document.getElementById("newUserName");
@@ -131,17 +132,16 @@ async function loadMe() {
   usersBtn.hidden = !isOwner;
   activityLogBtn.hidden = !isOwner;
   trashBtn.hidden = !isOwner;
-  refundedFilterBtn.hidden = !isOwner;
+  cancelledBtn.hidden = !isOwner;
+  refundedFilterOption.hidden = !isOwner;
 
   if (currentRole === "accounts") {
     // Accounts only ever needs the Billing view (what's ready to invoice,
-    // and whether it's been printed yet) — hide every other status tab and
-    // lock the view to Billing, enforced server-side too in /api/orders.
-    filterButtons.forEach((btn) => {
-      if (btn.dataset.status !== "billing") btn.hidden = true;
-    });
+    // and whether it's been printed yet) — lock the dropdown to Billing
+    // and disable it, enforced server-side too in /api/orders.
     currentFilter = "billing";
-    filterButtons.forEach((b) => b.classList.toggle("active", b.dataset.status === "billing"));
+    statusFilterSelect.value = "billing";
+    statusFilterSelect.disabled = true;
     invoiceFilterRow.hidden = false;
   }
 
@@ -149,15 +149,13 @@ async function loadMe() {
 
   if (currentRole === "packer") {
     // A packer only ever needs Billing orders whose invoice has already
-    // been printed — that's the signal packing can start. Lock to Billing
-    // + Printed and hide the other tabs/sub-filter entirely, enforced
-    // server-side too in /api/orders so it can't be bypassed.
-    filterButtons.forEach((btn) => {
-      if (btn.dataset.status !== "billing") btn.hidden = true;
-    });
+    // been printed — that's the signal packing can start. Lock the
+    // dropdown to Billing + Printed and hide the sub-filter entirely,
+    // enforced server-side too in /api/orders so it can't be bypassed.
     currentFilter = "billing";
     currentInvoiceFilter = "printed";
-    filterButtons.forEach((b) => b.classList.toggle("active", b.dataset.status === "billing"));
+    statusFilterSelect.value = "billing";
+    statusFilterSelect.disabled = true;
     invoiceFilterRow.hidden = true;
   }
 }
@@ -298,7 +296,7 @@ function renderOrders(orders) {
     ordersContainer.innerHTML = `
       <div class="empty-state">
         <div class="glyph">— empty manifest —</div>
-        <p>${currentFilter === "trash" ? "Trash is empty." : `No orders yet.${currentRole === "owner" ? " Set your n8n webhook in Settings, then hit Sync from Shopify." : " Ask an owner to sync from Shopify."}`}</p>
+        <p>${currentFilter === "trash" ? "Trash is empty." : currentFilter === "cancelled" ? "No cancelled orders." : `No orders yet.${currentRole === "owner" ? " Set your n8n webhook in Settings, then hit Sync from Shopify." : " Ask an owner to sync from Shopify."}`}</p>
       </div>`;
     return;
   }
@@ -329,9 +327,20 @@ function renderOrders(orders) {
       ? `<span class="invoice-badge billed-date-badge">Billed · ${new Date(order.billed_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</span>`
       : "";
     const billingEligible = (order.items || []).some((i) => i.status === "purchased" || i.status === "stock");
-    const canPack = canTogglePacked() && billingEligible;
+    // Cancelling is the packer/owner-only alternative to packing — same
+    // permission and eligibility as the Packed checkbox, so it shows up
+    // in exactly the same place. Once an order is cancelled, the Packed
+    // checkbox itself is hidden (packing a cancelled order makes no
+    // sense) but the Cancelled checkbox stays so it can be un-cancelled.
+    const canManageCancel = canTogglePacked() && billingEligible;
+    const canPack = canManageCancel && !order.cancelled;
     const packedReadonlyBadge = (!canTogglePacked() && order.packed)
       ? `<span class="invoice-badge packed-yes-badge">Packed</span>`
+      : "";
+    // Cancellation info (that it happened, and why) is only ever shown to
+    // owner/packer accounts — never staff, telecaller, or accounts roles.
+    const cancelledBadge = (canTogglePacked() && order.cancelled)
+      ? `<span class="invoice-badge cancelled-badge" title="${escapeHtml(order.cancelled_reason || "")}">Cancelled${order.cancelled_reason ? ": " + escapeHtml(order.cancelled_reason) : ""}</span>`
       : "";
     head.innerHTML = `
       <span class="order-head-left">
@@ -343,10 +352,12 @@ function renderOrders(orders) {
         ${amountBadge}
         ${billedDateBadge}
         ${packedReadonlyBadge}
+        ${cancelledBadge}
         ${assignedTo}
       </span>
       <span class="order-head-actions">
         ${canPack ? `<label class="order-packed-checkbox"><input type="checkbox" class="order-packed-input" ${order.packed ? "checked" : ""} /> Packed</label>` : ""}
+        ${canManageCancel ? `<label class="order-cancelled-checkbox"><input type="checkbox" class="order-cancelled-input" ${order.cancelled ? "checked" : ""} /> Cancelled</label>` : ""}
         ${canPrintInvoice ? `<button type="button" class="btn btn-ghost btn-small order-invoice-link" data-order-id="${escapeHtml(order.order_id)}">${order.invoice_number ? "Reprint Invoice" : "Print Invoice"}</button>` : ""}
         ${currentRole === "owner" ? `<button type="button" class="order-history-link" data-order-id="${escapeHtml(order.order_id)}">History</button>` : ""}
         ${currentRole === "owner" && currentFilter === "trash" ? `<button type="button" class="btn btn-primary btn-small order-restore-link" data-order-id="${escapeHtml(order.order_id)}">Restore</button>` : ""}
@@ -356,6 +367,24 @@ function renderOrders(orders) {
     if (canPack) {
       head.querySelector(".order-packed-input").addEventListener("change", (e) => {
         updateOrderPacked(order.order_id, e.target.checked, e.target);
+      });
+    }
+    if (canManageCancel) {
+      head.querySelector(".order-cancelled-input").addEventListener("change", (e) => {
+        if (e.target.checked) {
+          const reason = prompt(`Reason for cancelling order ${order.order_name || order.order_id}:`);
+          if (!reason || !reason.trim()) {
+            e.target.checked = false;
+            return;
+          }
+          updateOrderCancelled(order.order_id, true, reason.trim(), e.target);
+        } else {
+          if (!confirm("Remove the cancelled status from this order?")) {
+            e.target.checked = true;
+            return;
+          }
+          updateOrderCancelled(order.order_id, false, "", e.target);
+        }
       });
     }
     if (canPrintInvoice) {
@@ -443,6 +472,33 @@ async function updateOrderPacked(orderId, packed, checkboxEl) {
   const order = lastLoadedOrders.find((o) => o.order_id === orderId);
   if (order) order.packed = packed;
   showMessage(packed ? "Order marked as packed" : "Order marked as not packed");
+}
+
+async function updateOrderCancelled(orderId, cancelled, reason, checkboxEl) {
+  const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/cancelled`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cancelled, reason }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    showMessage(err.error || "Could not update cancelled status.", true);
+    if (checkboxEl) checkboxEl.checked = !cancelled;
+    return;
+  }
+  const data = await res.json();
+  const order = lastLoadedOrders.find((o) => o.order_id === orderId);
+  if (order) {
+    order.cancelled = data.cancelled;
+    order.cancelled_reason = data.cancelled_reason;
+    order.cancelled_by = data.cancelled_by;
+    order.cancelled_at = data.cancelled_at;
+  }
+  // Cancelling/un-cancelling changes whether the Packed checkbox should be
+  // showing at all (see canPack above), so re-render rather than just
+  // mutating the one field updateOrderPacked does.
+  renderOrders(filterByTrackQuery(lastLoadedOrders));
+  showMessage(cancelled ? "Order marked as cancelled" : "Cancelled status removed");
 }
 
 async function updatePurchaseAmount(itemId, value, inputEl) {
@@ -642,20 +698,16 @@ submitPasteOrderBtn.addEventListener("click", async () => {
 });
 
 
-filterButtons.forEach((btn) => {
-  btn.addEventListener("click", () => {
-    filterButtons.forEach((b) => b.classList.remove("active"));
-    btn.classList.add("active");
-    currentFilter = btn.dataset.status;
-    invoiceFilterRow.hidden = currentFilter !== "billing";
-    if (currentFilter !== "billing") {
-      currentInvoiceFilter = "";
-      invoiceFilterButtons.forEach((b) => b.classList.toggle("active", b.dataset.invoice === ""));
-    }
-    exportPendingBtn.hidden = currentFilter !== "pending";
-    updateTallyExportVisibility();
-    loadOrders();
-  });
+statusFilterSelect.addEventListener("change", () => {
+  currentFilter = statusFilterSelect.value;
+  invoiceFilterRow.hidden = currentFilter !== "billing";
+  if (currentFilter !== "billing") {
+    currentInvoiceFilter = "";
+    invoiceFilterButtons.forEach((b) => b.classList.toggle("active", b.dataset.invoice === ""));
+  }
+  exportPendingBtn.hidden = currentFilter !== "pending";
+  updateTallyExportVisibility();
+  loadOrders();
 });
 
 paymentFilterButtons.forEach((btn) => {
@@ -680,7 +732,16 @@ trashBtn.addEventListener("click", () => {
   currentFilter = "trash";
   updateTallyExportVisibility();
   currentInvoiceFilter = "";
-  filterButtons.forEach((b) => b.classList.remove("active"));
+  statusFilterSelect.value = "";
+  invoiceFilterRow.hidden = true;
+  loadOrders();
+});
+
+cancelledBtn.addEventListener("click", () => {
+  currentFilter = "cancelled";
+  updateTallyExportVisibility();
+  currentInvoiceFilter = "";
+  statusFilterSelect.value = "";
   invoiceFilterRow.hidden = true;
   loadOrders();
 });
@@ -991,6 +1052,7 @@ const ACTIVITY_ACTION_LABELS = {
   status_update: "Status",
   purchase_amount_update: "Amount",
   packed_update: "Packed",
+  cancelled_update: "Cancelled",
   sync: "Sync",
   manual_add: "Added (paste)",
   create_user: "New user",

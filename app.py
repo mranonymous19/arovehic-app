@@ -181,6 +181,10 @@ def init_db():
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_number TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_date TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS tally_exported_at TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled BOOLEAN NOT NULL DEFAULT false;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_reason TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_at TEXT;
         """
     )
     # Migration: tables created before the 'packer'/'accounts' roles existed
@@ -261,7 +265,8 @@ def log_activity(cur, item_id, item_name, action, details="", order_id=None):
 #                assigned to them (see /api/orders below).
 #   telecaller - view-only for orders/items, plus can add manual orders
 #                (they're the ones taking these calls).
-#   packer     - can toggle the packed flag only.
+#   packer     - can toggle the packed flag, or mark an order cancelled
+#                (with a reason) instead.
 #   accounts   - view-only, restricted to the Billing view: which orders
 #                are ready to invoice and whether each has been printed yet.
 # ---------------------------------------------------------------------------
@@ -958,11 +963,19 @@ def api_orders():
     if status_filter == "refunded" and session.get("role") != "owner":
         return jsonify({"error": "Only the owner can view Refunded items"}), 403
 
+    # Cancelled orders are their own view, same reasoning as Trash/Refunded
+    # above — only the owner gets a dedicated place to review every order a
+    # packer has cancelled.
+    if status_filter == "cancelled" and session.get("role") != "owner":
+        return jsonify({"error": "Only the owner can view Cancelled orders"}), 403
+
     # created_at is stored as ISO-8601 text (as it comes from Shopify), so
     # cast it to a date for the range comparison rather than a string match.
     query = "SELECT * FROM orders WHERE 1=1"
     params = []
     query += " AND deleted_at IS NOT NULL" if status_filter == "trash" else " AND deleted_at IS NULL"
+    if status_filter == "cancelled":
+        query += " AND cancelled = true"
     if date_from:
         # NULLIF guards against a blank/unparseable created_at (e.g. odd
         # sync data) throwing a cast error — it just won't match instead.
@@ -1060,6 +1073,8 @@ def api_orders():
                 continue
         elif status_filter == "trash":
             pass  # every deleted order shows as-is, items unfiltered
+        elif status_filter == "cancelled":
+            pass  # every cancelled order shows as-is, items unfiltered
         elif status_filter:
             items = [i for i in items if i["status"] == status_filter]
             if not items:
@@ -1115,6 +1130,10 @@ def api_orders():
                 "packed": order["packed"],
                 "packed_by": order["packed_by"],
                 "packed_at": order["packed_at"],
+                "cancelled": order["cancelled"],
+                "cancelled_reason": order["cancelled_reason"],
+                "cancelled_by": order["cancelled_by"],
+                "cancelled_at": order["cancelled_at"],
                 "assigned_to": assigned_to,
                 "invoice_number": order["invoice_number"],
                 "deleted_at": order["deleted_at"],
@@ -1708,6 +1727,58 @@ def api_update_order_packed(order_id):
     db.commit()
     cur.close()
     return jsonify({"ok": True, "order_id": order_id, "packed": packed, "packed_by": packed_by, "packed_at": packed_at})
+
+
+@app.route("/api/orders/<order_id>/cancelled", methods=["POST"])
+@packer_or_owner_required
+def api_update_order_cancelled(order_id):
+    """Packer/owner-only. An alternative to packing — a packer who can't
+    fulfil an order marks it cancelled instead, with a reason, rather than
+    just leaving it stuck. Uncancelling (packed=False here) clears the
+    reason and who/when, same as unpacking clears packed_by/packed_at."""
+    data = request.get_json(force=True) or {}
+    if "cancelled" not in data:
+        return jsonify({"error": "cancelled is required"}), 400
+    cancelled = bool(data.get("cancelled"))
+    reason = (data.get("reason") or "").strip()
+
+    if cancelled and not reason:
+        return jsonify({"error": "A cancellation reason is required"}), 400
+
+    who = session.get("name", "")
+    now = datetime.now(timezone.utc).isoformat()
+    cancelled_by = who if cancelled else None
+    cancelled_at = now if cancelled else None
+    cancelled_reason = reason if cancelled else None
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute(
+        "UPDATE orders SET cancelled = %s, cancelled_reason = %s, cancelled_by = %s, cancelled_at = %s "
+        "WHERE shopify_order_id = %s RETURNING order_name",
+        (cancelled, cancelled_reason, cancelled_by, cancelled_at, order_id),
+    )
+    row = cur.fetchone()
+    if row is None:
+        cur.close()
+        return jsonify({"error": "Order not found"}), 404
+
+    log_activity(
+        cur, None, row["order_name"] or order_id, "cancelled_update",
+        f"{who} marked order {row['order_name'] or order_id} as "
+        f"{'cancelled (' + reason + ')' if cancelled else 'not cancelled'}",
+        order_id=order_id,
+    )
+    db.commit()
+    cur.close()
+    return jsonify({
+        "ok": True,
+        "order_id": order_id,
+        "cancelled": cancelled,
+        "cancelled_reason": cancelled_reason,
+        "cancelled_by": cancelled_by,
+        "cancelled_at": cancelled_at,
+    })
 
 
 @app.route("/api/activity-log", methods=["GET"])

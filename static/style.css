@@ -156,6 +156,26 @@ a.btn { text-decoration: none; display: inline-block; }
   color: var(--muted);
 }
 
+.status-filter-select {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 9px 30px 9px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  background: var(--card);
+  color: var(--ink);
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b6558' stroke-width='1.5' fill='none' fill-rule='evenodd'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+}
+.status-filter-select:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .date-filter-input {
   border: 1px solid var(--line);
   border-radius: 3px;
@@ -350,6 +370,27 @@ main {
   color: var(--green);
   background: var(--green-bg);
   border: 1px solid var(--green);
+}
+
+.order-cancelled-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--red);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.order-cancelled-checkbox input { width: auto; margin: 0; }
+.cancelled-badge {
+  color: var(--red);
+  background: var(--red-bg);
+  border: 1px solid var(--red);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-pills {
@@ -698,6 +739,7 @@ main {
   main { padding: 16px 14px 60px; }
   .filters { padding: 14px 14px 0; gap: 10px; }
   .filter-btn { padding: 9px 16px; font-size: 13px; }
+  .status-filter-select { flex: 1 1 100%; }
   .order-track-input { flex-basis: 100%; padding: 11px 16px; }
 
   /* Every text input/select at 16px on phones — anything smaller makes
@@ -712,6 +754,8 @@ main {
   .order-head-actions button { padding: 9px 14px; font-size: 13px; }
   .order-packed-checkbox { font-size: 14px; }
   .order-packed-checkbox input { width: 20px; height: 20px; }
+  .order-cancelled-checkbox { font-size: 14px; }
+  .order-cancelled-checkbox input { width: 20px; height: 20px; }
 
   /* Item rows: title on its own line, then amount + status pills wrap
      underneath with generous spacing and larger tap targets — this was

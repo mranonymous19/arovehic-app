@@ -15,6 +15,7 @@
       <button id="settingsBtn" class="btn btn-ghost" hidden>Settings</button>
       <button id="usersBtn" class="btn btn-ghost" hidden>Manage Users</button>
       <button id="activityLogBtn" class="btn btn-ghost" hidden>Activity Log</button>
+      <button id="cancelledBtn" class="btn btn-ghost" hidden>Cancelled Orders</button>
       <button id="trashBtn" class="btn btn-ghost" hidden>Trash</button>
       <span id="userBadge" class="user-badge"></span>
       <button id="accountBtn" class="btn btn-ghost">Account</button>
@@ -26,15 +27,18 @@
 
   <div class="filters">
     <input id="orderTrackInput" type="search" placeholder="Track an order — name, customer, or Order ID" class="order-track-input">
-    <button class="filter-btn active" data-status="">All</button>
-    <button class="filter-btn" data-status="pending">Pending</button>
-    <button class="filter-btn" data-status="purchased">Purchased</button>
-    <button class="filter-btn" data-status="stock">In Stock</button>
-    <button class="filter-btn" data-status="na">N/A</button>
-    <button id="refundedFilterBtn" class="filter-btn" data-status="refunded">Refunded</button>
-    <button class="filter-btn" data-status="wait">Wait</button>
-    <button class="filter-btn" data-status="closed">Closed</button>
-    <button class="filter-btn" data-status="billing">Billing</button>
+    <label class="date-filter-label" for="statusFilterSelect">Status</label>
+    <select id="statusFilterSelect" class="status-filter-select">
+      <option value="">All</option>
+      <option value="pending">Pending</option>
+      <option value="purchased">Purchased</option>
+      <option value="stock">In Stock</option>
+      <option value="na">N/A</option>
+      <option id="refundedFilterOption" value="refunded" hidden>Refunded</option>
+      <option value="wait">Wait</option>
+      <option value="closed">Closed</option>
+      <option value="billing">Billing</option>
+    </select>
   </div>
 
   <div id="invoiceFilterRow" class="filters" hidden>
