@@ -189,6 +189,46 @@ async function loadOrders() {
   const orders = await res.json();
   lastLoadedOrders = orders;
   renderOrders(filterByTrackQuery(orders));
+  loadTodaySummary();
+}
+
+// ---------------------------------------------------------------------------
+// Today's-orders summary bar (arrived / proceeded for billing / pending)
+// ---------------------------------------------------------------------------
+
+const todaySummaryBar = document.getElementById("todaySummaryBar");
+const summaryArrivedVal = document.getElementById("summaryArrivedVal");
+const summaryBillingVal = document.getElementById("summaryBillingVal");
+const summaryPendingVal = document.getElementById("summaryPendingVal");
+
+function todayDateStr() {
+  // Local (browser) date, not UTC — so "today" matches the calendar date
+  // for whoever is looking at the screen, same as the date-filter inputs.
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+async function loadTodaySummary() {
+  // Accounts/Packer are locked to a single Billing-only view already —
+  // an "arrived/pending" breakdown isn't meaningful there, so skip it.
+  if (currentRole === "accounts" || currentRole === "packer") {
+    todaySummaryBar.hidden = true;
+    return;
+  }
+  try {
+    const res = await fetch(`/api/orders/summary?date=${todayDateStr()}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    summaryArrivedVal.textContent = data.arrived;
+    summaryBillingVal.textContent = data.billing;
+    summaryPendingVal.textContent = data.pending;
+    todaySummaryBar.hidden = false;
+  } catch (err) {
+    // Non-critical widget — fail quietly and leave it hidden.
+  }
 }
 
 function filterByTrackQuery(orders) {

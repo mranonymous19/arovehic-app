@@ -1169,6 +1169,76 @@ def api_orders():
     return jsonify(result)
 
 
+@app.route("/api/orders/summary", methods=["GET"])
+@login_required
+def api_orders_summary():
+    """Today's-orders header stats: how many orders arrived, how many of
+    those have been moved through to Billing (purchased/in-stock, nothing
+    left pending), and how many are still pending. `date` is 'YYYY-MM-DD'
+    and is expected from the browser's local date (so "today" matches
+    what the person looking at the screen considers today) — defaults to
+    the server's UTC date if omitted.
+    """
+    db = get_db()
+    cur = db.cursor()
+    date_str = request.args.get("date") or datetime.now(timezone.utc).date().isoformat()
+
+    cur.execute(
+        "SELECT * FROM orders WHERE deleted_at IS NULL "
+        "AND NULLIF(created_at, '')::date = %s::date",
+        (date_str,),
+    )
+    orders = cur.fetchall()
+
+    order_ids = [order["shopify_order_id"] for order in orders]
+    items_by_order = {oid: [] for oid in order_ids}
+    if order_ids:
+        cur.execute(
+            "SELECT * FROM items WHERE shopify_order_id = ANY(%s)",
+            (order_ids,),
+        )
+        for item in cur.fetchall():
+            items_by_order.setdefault(item["shopify_order_id"], []).append(item)
+
+    # Same "which orders can this role see" rule as /api/orders: a staff
+    # account only ever sees orders currently assigned to their COD/Prepaid
+    # duty, so their summary should only count those, not every order that
+    # arrived today.
+    cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
+    cod_staff_ids = _parse_staff_ids(get_setting("cod_staff_id", ""))
+    prepaid_staff_ids = _parse_staff_ids(get_setting("prepaid_staff_id", ""))
+
+    arrived = 0
+    billing = 0
+    pending = 0
+    for order in orders:
+        if session.get("role") == "staff":
+            shipping_amount = order["shipping_amount"]
+            if shipping_amount is None and order.get("payment_type") not in ("cod", "prepaid"):
+                continue
+            payment_type = resolve_payment_type(order, cod_threshold)
+            assigned_staff_ids = cod_staff_ids if payment_type == "cod" else prepaid_staff_ids
+            if str(session.get("user_id")) not in assigned_staff_ids:
+                continue
+
+        items = items_by_order.get(order["shopify_order_id"], [])
+        arrived += 1
+
+        # Same "closed" + "has billable items" test used for the Billing
+        # view in /api/orders — an order counts as billed once every item
+        # has a final status and at least one of them is purchased/in-stock
+        # (an order that's closed but entirely N/A never reaches Billing).
+        closed = bool(items) and all(i["status"] != "pending" for i in items)
+        billing_items = [i for i in items if i["status"] in ("purchased", "stock")]
+        if closed and billing_items:
+            billing += 1
+        else:
+            pending += 1
+
+    cur.close()
+    return jsonify({"date": date_str, "arrived": arrived, "billing": billing, "pending": pending})
+
+
 @app.route("/api/orders/export/pending.xlsx", methods=["GET"])
 @login_required
 def api_export_pending_orders():

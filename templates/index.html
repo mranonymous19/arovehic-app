@@ -25,6 +25,21 @@
 
   <div id="syncMsg" class="banner" hidden></div>
 
+  <div id="todaySummaryBar" class="today-summary" hidden>
+    <div class="today-summary-stat">
+      <span class="today-summary-value" id="summaryArrivedVal">0</span>
+      <span class="today-summary-label">Arrived Today</span>
+    </div>
+    <div class="today-summary-stat">
+      <span class="today-summary-value" id="summaryBillingVal">0</span>
+      <span class="today-summary-label">Proceeded for Billing</span>
+    </div>
+    <div class="today-summary-stat">
+      <span class="today-summary-value" id="summaryPendingVal">0</span>
+      <span class="today-summary-label">Still Pending</span>
+    </div>
+  </div>
+
   <div class="filters">
     <input id="orderTrackInput" type="search" placeholder="Track an order — name, customer, or Order ID" class="order-track-input">
     <label class="date-filter-label" for="statusFilterSelect">Status</label>
