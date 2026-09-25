@@ -1172,21 +1172,24 @@ def api_orders():
 @app.route("/api/orders/summary", methods=["GET"])
 @login_required
 def api_orders_summary():
-    """Today's-orders header stats: how many orders arrived, how many of
-    those have been moved through to Billing (purchased/in-stock, nothing
-    left pending), and how many are still pending. `date` is 'YYYY-MM-DD'
-    and is expected from the browser's local date (so "today" matches
-    what the person looking at the screen considers today) — defaults to
-    the server's UTC date if omitted.
+    """Order-count summary for a date range: how many orders arrived, how
+    many of those have been moved through to Billing (purchased/in-stock,
+    nothing left pending), and how many are still pending. Takes
+    date_from/date_to ('YYYY-MM-DD', inclusive, from the browser's local
+    date so "today" matches what the person looking at the screen
+    considers today) — both default to the server's UTC date if omitted.
     """
     db = get_db()
     cur = db.cursor()
-    date_str = request.args.get("date") or datetime.now(timezone.utc).date().isoformat()
+    today_str = datetime.now(timezone.utc).date().isoformat()
+    date_from = request.args.get("date_from") or today_str
+    date_to = request.args.get("date_to") or today_str
 
     cur.execute(
         "SELECT * FROM orders WHERE deleted_at IS NULL "
-        "AND NULLIF(created_at, '')::date = %s::date",
-        (date_str,),
+        "AND NULLIF(created_at, '')::date >= %s::date "
+        "AND NULLIF(created_at, '')::date <= %s::date",
+        (date_from, date_to),
     )
     orders = cur.fetchall()
 
@@ -1202,8 +1205,8 @@ def api_orders_summary():
 
     # Same "which orders can this role see" rule as /api/orders: a staff
     # account only ever sees orders currently assigned to their COD/Prepaid
-    # duty, so their summary should only count those, not every order that
-    # arrived today.
+    # duty, so their summary should only count those, not every order in
+    # the range.
     cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
     cod_staff_ids = _parse_staff_ids(get_setting("cod_staff_id", ""))
     prepaid_staff_ids = _parse_staff_ids(get_setting("prepaid_staff_id", ""))
@@ -1236,7 +1239,9 @@ def api_orders_summary():
             pending += 1
 
     cur.close()
-    return jsonify({"date": date_str, "arrived": arrived, "billing": billing, "pending": pending})
+    return jsonify(
+        {"date_from": date_from, "date_to": date_to, "arrived": arrived, "billing": billing, "pending": pending}
+    )
 
 
 @app.route("/api/orders/export/pending.xlsx", methods=["GET"])

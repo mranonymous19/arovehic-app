@@ -125,6 +125,22 @@ a.btn { text-decoration: none; display: inline-block; }
   flex-wrap: wrap;
 }
 
+.modal-box .today-summary {
+  padding: 4px 0 0;
+}
+
+.summary-range-filters {
+  padding: 0 0 4px;
+}
+
+.summary-custom-range {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 4px 0 14px;
+}
+
 .today-summary-stat {
   flex: 1 1 160px;
   background: var(--card);

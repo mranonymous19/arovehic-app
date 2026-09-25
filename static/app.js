@@ -133,6 +133,10 @@ async function loadMe() {
   activityLogBtn.hidden = !isOwner;
   trashBtn.hidden = !(isOwner || currentRole === "telecaller");
   cancelledBtn.hidden = !(isOwner || currentRole === "telecaller");
+  // Accounts/Packer are locked to a single Billing-only view already — an
+  // arrived/pending breakdown isn't meaningful there, so the Summary
+  // button is only shown to the roles that see the full order flow.
+  summaryBtn.hidden = !(isOwner || currentRole === "staff" || currentRole === "telecaller");
   // Telecaller is otherwise view-only everywhere (every edit endpoint is
   // gated server-side too), but gets the same visibility as the owner so
   // they can pull up any order's full status while on a call.
@@ -189,47 +193,99 @@ async function loadOrders() {
   const orders = await res.json();
   lastLoadedOrders = orders;
   renderOrders(filterByTrackQuery(orders));
-  loadTodaySummary();
 }
 
 // ---------------------------------------------------------------------------
-// Today's-orders summary bar (arrived / proceeded for billing / pending)
+// Summary modal (order counts, date-range filterable)
 // ---------------------------------------------------------------------------
 
-const todaySummaryBar = document.getElementById("todaySummaryBar");
+const summaryBtn = document.getElementById("summaryBtn");
+const summaryModal = document.getElementById("summaryModal");
+const closeSummaryBtn = document.getElementById("closeSummaryBtn");
+const summaryRangeButtons = document.querySelectorAll(".filter-btn[data-range]");
+const summaryCustomRange = document.getElementById("summaryCustomRange");
+const summaryFromInput = document.getElementById("summaryFromInput");
+const summaryToInput = document.getElementById("summaryToInput");
+const summaryApplyCustomBtn = document.getElementById("summaryApplyCustomBtn");
+const summaryRangeLabel = document.getElementById("summaryRangeLabel");
 const summaryArrivedVal = document.getElementById("summaryArrivedVal");
 const summaryBillingVal = document.getElementById("summaryBillingVal");
 const summaryPendingVal = document.getElementById("summaryPendingVal");
 
-function todayDateStr() {
-  // Local (browser) date, not UTC — so "today" matches the calendar date
-  // for whoever is looking at the screen, same as the date-filter inputs.
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+let currentSummaryRange = "today";
+
+function localDateStr(date) {
+  // Local (browser) date, not UTC — so "today"/"yesterday" match the
+  // calendar date for whoever is looking at the screen.
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
-async function loadTodaySummary() {
-  // Accounts/Packer are locked to a single Billing-only view already —
-  // an "arrived/pending" breakdown isn't meaningful there, so skip it.
-  if (currentRole === "accounts" || currentRole === "packer") {
-    todaySummaryBar.hidden = true;
+function summaryRangeDates(range) {
+  const today = new Date();
+  if (range === "yesterday") {
+    const y = new Date(today);
+    y.setDate(y.getDate() - 1);
+    return { from: localDateStr(y), to: localDateStr(y) };
+  }
+  if (range === "7days") {
+    const from = new Date(today);
+    from.setDate(from.getDate() - 6); // last 7 days inclusive of today
+    return { from: localDateStr(from), to: localDateStr(today) };
+  }
+  if (range === "custom") {
+    return { from: summaryFromInput.value, to: summaryToInput.value };
+  }
+  // "today"
+  return { from: localDateStr(today), to: localDateStr(today) };
+}
+
+function summaryRangeLabelText(range, from, to) {
+  if (range === "today") return "Today";
+  if (range === "yesterday") return "Yesterday";
+  if (range === "7days") return "Last 7 days";
+  if (from && to) return from === to ? from : `${from} to ${to}`;
+  return "Pick a date range";
+}
+
+async function loadSummary(range) {
+  const { from, to } = summaryRangeDates(range);
+  if (range === "custom" && (!from || !to)) {
+    summaryRangeLabel.textContent = "Pick a from and to date.";
     return;
   }
+  summaryRangeLabel.textContent = summaryRangeLabelText(range, from, to);
   try {
-    const res = await fetch(`/api/orders/summary?date=${todayDateStr()}`);
+    const res = await fetch(`/api/orders/summary?date_from=${from}&date_to=${to}`);
     if (!res.ok) return;
     const data = await res.json();
     summaryArrivedVal.textContent = data.arrived;
     summaryBillingVal.textContent = data.billing;
     summaryPendingVal.textContent = data.pending;
-    todaySummaryBar.hidden = false;
   } catch (err) {
-    // Non-critical widget — fail quietly and leave it hidden.
+    summaryRangeLabel.textContent = "Could not load the summary.";
   }
 }
+
+summaryBtn.addEventListener("click", () => {
+  summaryModal.hidden = false;
+  loadSummary(currentSummaryRange);
+});
+closeSummaryBtn.addEventListener("click", () => { summaryModal.hidden = true; });
+
+summaryRangeButtons.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    summaryRangeButtons.forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    currentSummaryRange = btn.dataset.range;
+    summaryCustomRange.hidden = currentSummaryRange !== "custom";
+    if (currentSummaryRange !== "custom") loadSummary(currentSummaryRange);
+  });
+});
+
+summaryApplyCustomBtn.addEventListener("click", () => loadSummary("custom"));
 
 function filterByTrackQuery(orders) {
   const q = orderTrackQuery.trim().toLowerCase();

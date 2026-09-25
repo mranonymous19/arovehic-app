@@ -10,6 +10,7 @@
   <header class="topbar">
     <h1>Shopify Purchase Tracker</h1>
     <div class="topbar-actions">
+      <button id="summaryBtn" class="btn btn-ghost" hidden>Summary</button>
       <button id="syncBtn" class="btn btn-primary" hidden>Sync from Shopify</button>
       <button id="pasteOrderBtn" class="btn btn-ghost" hidden>Add Order (paste)</button>
       <button id="settingsBtn" class="btn btn-ghost" hidden>Settings</button>
@@ -24,21 +25,6 @@
   </header>
 
   <div id="syncMsg" class="banner" hidden></div>
-
-  <div id="todaySummaryBar" class="today-summary" hidden>
-    <div class="today-summary-stat">
-      <span class="today-summary-value" id="summaryArrivedVal">0</span>
-      <span class="today-summary-label">Arrived Today</span>
-    </div>
-    <div class="today-summary-stat">
-      <span class="today-summary-value" id="summaryBillingVal">0</span>
-      <span class="today-summary-label">Proceeded for Billing</span>
-    </div>
-    <div class="today-summary-stat">
-      <span class="today-summary-value" id="summaryPendingVal">0</span>
-      <span class="today-summary-label">Still Pending</span>
-    </div>
-  </div>
 
   <div class="filters">
     <input id="orderTrackInput" type="search" placeholder="Track an order — name, customer, or Order ID" class="order-track-input">
@@ -240,6 +226,49 @@
       <div class="modal-actions">
         <button id="closePasteOrderBtn" class="btn btn-ghost">Cancel</button>
         <button id="submitPasteOrderBtn" class="btn btn-primary">Add Order</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Summary modal (order counts, date-range filterable) -->
+  <div id="summaryModal" class="modal" hidden>
+    <div class="modal-box">
+      <h2>Summary</h2>
+
+      <div class="filters summary-range-filters">
+        <button class="filter-btn active" data-range="today">Today</button>
+        <button class="filter-btn" data-range="yesterday">Yesterday</button>
+        <button class="filter-btn" data-range="7days">Last 7 Days</button>
+        <button class="filter-btn" data-range="custom">Custom</button>
+      </div>
+
+      <div id="summaryCustomRange" class="summary-custom-range" hidden>
+        <label class="date-filter-label" for="summaryFromInput">From</label>
+        <input id="summaryFromInput" type="date" class="date-filter-input">
+        <label class="date-filter-label" for="summaryToInput">To</label>
+        <input id="summaryToInput" type="date" class="date-filter-input">
+        <button id="summaryApplyCustomBtn" class="btn btn-primary btn-small">Apply</button>
+      </div>
+
+      <p id="summaryRangeLabel" class="modal-subtext"></p>
+
+      <div class="today-summary">
+        <div class="today-summary-stat">
+          <span class="today-summary-value" id="summaryArrivedVal">0</span>
+          <span class="today-summary-label">Orders Arrived</span>
+        </div>
+        <div class="today-summary-stat">
+          <span class="today-summary-value" id="summaryBillingVal">0</span>
+          <span class="today-summary-label">Proceeded for Billing</span>
+        </div>
+        <div class="today-summary-stat">
+          <span class="today-summary-value" id="summaryPendingVal">0</span>
+          <span class="today-summary-label">Still Pending</span>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button id="closeSummaryBtn" class="btn btn-ghost">Close</button>
       </div>
     </div>
   </div>
