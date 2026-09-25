@@ -262,7 +262,10 @@ def log_activity(cur, item_id, item_name, action, details="", order_id=None):
 # Five roles:
 #   owner      - full control: sync, settings, status updates, manage users.
 #   staff      - can update item status only; only sees orders currently
-#                assigned to them (see /api/orders below).
+#                assigned to them (see /api/orders below). Can also print
+#                (but not reprint) the invoice for their own orders once
+#                an order reaches Billing — reprinting an already-printed
+#                invoice stays owner/accounts only.
 #   telecaller - view-only for orders/items (including Trash, Refunded,
 #                and Cancelled — same visibility as owner, just nothing is
 #                editable), plus can add manual orders (they're the ones
@@ -351,6 +354,22 @@ def accounts_or_owner_required(f):
     def wrapper(*args, **kwargs):
         if session.get("role") not in ("owner", "accounts"):
             return jsonify({"error": "Only accounts or owner accounts can print invoices"}), 403
+        return f(*args, **kwargs)
+
+    return wrapper
+
+
+def can_print_invoice_required(f):
+    @wraps(f)
+    @login_required
+    def wrapper(*args, **kwargs):
+        # Staff can print their own orders' invoices too (a purchase staff
+        # member finishing an order is exactly who needs to hand over a
+        # printed invoice), but only the first, unprinted copy — see the
+        # invoice_number check inside api_order_invoice for the reprint
+        # restriction.
+        if session.get("role") not in ("owner", "accounts", "staff"):
+            return jsonify({"error": "Only accounts, staff, or owner accounts can print invoices"}), 403
         return f(*args, **kwargs)
 
     return wrapper
@@ -1232,7 +1251,7 @@ def api_export_pending_orders():
 
 
 @app.route("/api/orders/<order_id>/invoice.pdf", methods=["GET"])
-@accounts_or_owner_required
+@can_print_invoice_required
 def api_order_invoice(order_id):
     db = get_db()
     cur = db.cursor()
@@ -1241,6 +1260,13 @@ def api_order_invoice(order_id):
     if not order:
         cur.close()
         return jsonify({"error": "Order not found"}), 404
+
+    # Staff can print the first copy of an invoice, but reprinting one
+    # that's already been printed (a new invoice number is never issued
+    # for it — see below) is an accounts/owner action only.
+    if session.get("role") == "staff" and order["invoice_number"]:
+        cur.close()
+        return jsonify({"error": "This invoice has already been printed — ask accounts or the owner to reprint it"}), 403
 
     cur.execute(
         "SELECT * FROM items WHERE shopify_order_id = %s ORDER BY sort_order",
@@ -1266,7 +1292,8 @@ def api_order_invoice(order_id):
     payment_type = resolve_payment_type(order, cod_threshold) or "prepaid"
     invoice_prefix = "COD" if payment_type == "cod" else "SHP"
 
-    if not order["invoice_number"]:
+    is_first_print = not order["invoice_number"]
+    if is_first_print:
         # Assign the next number from a continuous counter (starts at 2501)
         # the first time this order is printed, and lock the settings row
         # while doing it so two people printing at once can't collide on
@@ -1287,11 +1314,20 @@ def api_order_invoice(order_id):
             "UPDATE orders SET invoice_number = %s, invoice_date = %s WHERE shopify_order_id = %s",
             (invoice_number, invoice_date, order_id),
         )
-        db.commit()
     else:
         invoice_number = order["invoice_number"]
         invoice_date = order["invoice_date"]
 
+    # Log who printed (or reprinted) this invoice — the Billing view only
+    # shows a Printed/Not-Printed badge, this is what answers "who printed
+    # it" when that's asked later.
+    log_activity(
+        cur, None, order["order_name"] or order_id,
+        "invoice_print" if is_first_print else "invoice_reprint",
+        f"{session['name']} {'printed' if is_first_print else 'reprinted'} invoice {invoice_number}",
+        order_id=order_id,
+    )
+    db.commit()
     cur.close()
 
     order_dict = dict(order)

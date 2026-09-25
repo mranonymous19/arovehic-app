@@ -317,7 +317,14 @@ function renderOrders(orders) {
       ? `<span class="assigned-to">Assigned: ${escapeHtml(order.assigned_to)}</span>`
       : "";
     const showInvoiceInfo = currentFilter === "billing";
-    const canPrintInvoice = showInvoiceInfo && (currentRole === "owner" || currentRole === "accounts");
+    // Staff can only print the first, not-yet-printed copy of an invoice
+    // (for their own assigned orders — /api/orders already scopes what
+    // they see); reprinting an already-printed one stays accounts/owner
+    // only, same as the server enforces in api_order_invoice.
+    const canPrintInvoice = showInvoiceInfo && (
+      currentRole === "owner" || currentRole === "accounts" ||
+      (currentRole === "staff" && !order.invoice_number)
+    );
     const invoiceBadge = showInvoiceInfo
       ? (order.invoice_number
           ? `<span class="invoice-badge invoice-badge-printed">Invoice Printed · ${escapeHtml(order.invoice_number)}</span>`
@@ -1060,6 +1067,8 @@ const ACTIVITY_ACTION_LABELS = {
   cancelled_update: "Cancelled",
   sync: "Sync",
   manual_add: "Added (paste)",
+  invoice_print: "Invoice printed",
+  invoice_reprint: "Invoice reprinted",
   create_user: "New user",
   delete_user: "Removed user",
   reset_password: "Password reset",
