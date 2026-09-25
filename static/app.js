@@ -323,8 +323,58 @@ function renderSummaryOrderList(bucket) {
   const listEl = summaryOrderListEls[bucket];
   const orders = lastSummaryOrders[bucket] || [];
   listEl.innerHTML = orders.length
-    ? orders.map((name) => `<span class="summary-order-chip">${escapeHtml(name)}</span>`).join("")
+    ? orders.map((name) => `<button type="button" class="summary-order-chip" data-order-name="${escapeHtml(name)}">${escapeHtml(name)}</button>`).join("")
     : `<span class="summary-order-list-empty">None in this range.</span>`;
+}
+
+// Clicking an order number inside the summary breakdown (arrived/billing/
+// pending) jumps straight to that order in the main list below, instead of
+// making someone copy the number and paste it into the search box
+// themselves. One delegated listener covers all three lists since they're
+// re-rendered on every open/range change.
+Object.values(summaryOrderListEls).forEach((listEl) => {
+  listEl.addEventListener("click", (e) => {
+    const chip = e.target.closest(".summary-order-chip");
+    if (!chip) return;
+    goToOrder(chip.dataset.orderName);
+  });
+});
+
+function goToOrder(orderName) {
+  if (!orderName) return;
+
+  // Jumping to a specific order means seeing it regardless of which
+  // status/date/payment filter happens to be active, so clear anything
+  // that could hide it — then search for just this order number.
+  summaryModal.hidden = true;
+  currentFilter = "";
+  statusFilterSelect.value = "";
+  statusFilterSelect.disabled = false;
+  invoiceFilterRow.hidden = true;
+  currentInvoiceFilter = "";
+  currentPaymentFilter = "";
+  paymentFilterButtons.forEach((b) => b.classList.toggle("active", b.dataset.payment === ""));
+  currentDateFrom = "";
+  currentDateTo = "";
+  dateFromInput.value = "";
+  dateToInput.value = "";
+  updateClearDateFilterVisibility();
+  exportPendingBtn.hidden = true;
+  updateTallyExportVisibility();
+
+  orderTrackQuery = orderName;
+  orderTrackInput.value = orderName;
+
+  loadOrders().then(() => {
+    const card = ordersContainer.querySelector(
+      `.order-card[data-order-name="${CSS.escape(orderName)}"]`
+    );
+    if (card) {
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+      card.classList.add("order-card-jumped");
+      setTimeout(() => card.classList.remove("order-card-jumped"), 2000);
+    }
+  });
 }
 
 summaryViewOrdersButtons.forEach((btn) => {
@@ -488,6 +538,7 @@ function renderOrders(orders) {
   for (const order of orders) {
     const card = document.createElement("div");
     card.className = "order-card";
+    card.dataset.orderName = order.order_name || "";
 
     const head = document.createElement("div");
     head.className = "order-head";

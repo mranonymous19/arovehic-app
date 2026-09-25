@@ -207,10 +207,27 @@ a.btn { text-decoration: none; display: inline-block; }
 .summary-order-chip {
   font-size: 11px;
   background: var(--gray-bg);
-  color: var(--gray);
+  color: var(--blue);
+  border: none;
   border-radius: 3px;
   padding: 2px 7px;
   white-space: nowrap;
+  cursor: pointer;
+  text-decoration: underline;
+  font-family: inherit;
+}
+.summary-order-chip:hover,
+.summary-order-chip:focus-visible {
+  background: var(--blue);
+  color: #fff;
+}
+
+@keyframes order-card-jumped-flash {
+  0%, 100% { box-shadow: none; }
+  20%, 60% { box-shadow: 0 0 0 3px var(--amber); }
+}
+.order-card-jumped {
+  animation: order-card-jumped-flash 2s ease-in-out;
 }
 
 .summary-order-list-empty {
