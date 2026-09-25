@@ -232,7 +232,7 @@
 
   <!-- Summary modal (order counts, date-range filterable) -->
   <div id="summaryModal" class="modal" hidden>
-    <div class="modal-box">
+    <div class="modal-box modal-box-wide">
       <h2>Summary</h2>
 
       <div class="filters summary-range-filters">
@@ -269,14 +269,20 @@
         <div class="today-summary-stat">
           <span class="today-summary-value" id="summaryArrivedVal">0</span>
           <span class="today-summary-label">Orders Arrived</span>
+          <button type="button" class="summary-view-orders-btn" data-bucket="arrived">View orders</button>
+          <div class="summary-order-list" id="summaryArrivedList" hidden></div>
         </div>
         <div class="today-summary-stat">
           <span class="today-summary-value" id="summaryBillingVal">0</span>
           <span class="today-summary-label">Proceeded for Billing</span>
+          <button type="button" class="summary-view-orders-btn" data-bucket="billing">View orders</button>
+          <div class="summary-order-list" id="summaryBillingList" hidden></div>
         </div>
         <div class="today-summary-stat">
           <span class="today-summary-value" id="summaryPendingVal">0</span>
           <span class="today-summary-label">Still Pending</span>
+          <button type="button" class="summary-view-orders-btn" data-bucket="pending">View orders</button>
+          <div class="summary-order-list" id="summaryPendingList" hidden></div>
         </div>
       </div>
 

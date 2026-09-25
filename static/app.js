@@ -213,6 +213,13 @@ const summaryRangeLabel = document.getElementById("summaryRangeLabel");
 const summaryArrivedVal = document.getElementById("summaryArrivedVal");
 const summaryBillingVal = document.getElementById("summaryBillingVal");
 const summaryPendingVal = document.getElementById("summaryPendingVal");
+const summaryOrderListEls = {
+  arrived: document.getElementById("summaryArrivedList"),
+  billing: document.getElementById("summaryBillingList"),
+  pending: document.getElementById("summaryPendingList"),
+};
+const summaryViewOrdersButtons = document.querySelectorAll(".summary-view-orders-btn");
+let lastSummaryOrders = { arrived: [], billing: [], pending: [] };
 
 let currentSummaryRange = "today";
 
@@ -295,13 +302,52 @@ async function loadSummary(range) {
     summaryArrivedVal.textContent = data.arrived;
     summaryBillingVal.textContent = data.billing;
     summaryPendingVal.textContent = data.pending;
+    lastSummaryOrders = {
+      arrived: data.arrived_orders || [],
+      billing: data.billing_orders || [],
+      pending: data.pending_orders || [],
+    };
+    // Re-render any order list that's currently open (or collapse+relabel
+    // it) so it doesn't keep showing stale numbers from the previous
+    // range after Apply/quick-filter is clicked again.
+    Object.keys(summaryOrderListEls).forEach((bucket) => {
+      const listEl = summaryOrderListEls[bucket];
+      if (!listEl.hidden) renderSummaryOrderList(bucket);
+    });
   } catch (err) {
     summaryRangeLabel.textContent = "Could not load the summary.";
   }
 }
 
+function renderSummaryOrderList(bucket) {
+  const listEl = summaryOrderListEls[bucket];
+  const orders = lastSummaryOrders[bucket] || [];
+  listEl.innerHTML = orders.length
+    ? orders.map((name) => `<span class="summary-order-chip">${escapeHtml(name)}</span>`).join("")
+    : `<span class="summary-order-list-empty">None in this range.</span>`;
+}
+
+summaryViewOrdersButtons.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const bucket = btn.dataset.bucket;
+    const listEl = summaryOrderListEls[bucket];
+    const opening = listEl.hidden;
+    if (opening) renderSummaryOrderList(bucket);
+    listEl.hidden = !opening;
+    btn.textContent = opening ? "Hide orders" : "View orders";
+  });
+});
+
+function collapseSummaryOrderLists() {
+  summaryViewOrdersButtons.forEach((btn) => {
+    summaryOrderListEls[btn.dataset.bucket].hidden = true;
+    btn.textContent = "View orders";
+  });
+}
+
 summaryBtn.addEventListener("click", () => {
   summaryModal.hidden = false;
+  collapseSummaryOrderLists();
   loadSummary(currentSummaryRange);
 });
 closeSummaryBtn.addEventListener("click", () => { summaryModal.hidden = true; });
@@ -312,11 +358,15 @@ summaryRangeButtons.forEach((btn) => {
     btn.classList.add("active");
     currentSummaryRange = btn.dataset.range;
     summaryCustomRange.hidden = currentSummaryRange !== "custom";
+    collapseSummaryOrderLists();
     if (currentSummaryRange !== "custom") loadSummary(currentSummaryRange);
   });
 });
 
-summaryApplyCustomBtn.addEventListener("click", () => loadSummary("custom"));
+summaryApplyCustomBtn.addEventListener("click", () => {
+  collapseSummaryOrderLists();
+  loadSummary("custom");
+});
 
 function filterByTrackQuery(orders) {
   const q = orderTrackQuery.trim().toLowerCase();

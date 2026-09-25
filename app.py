@@ -1240,6 +1240,9 @@ def api_orders_summary():
     arrived = 0
     billing = 0
     pending = 0
+    arrived_orders = []
+    billing_orders = []
+    pending_orders = []
     for order in orders:
         if session.get("role") == "staff":
             shipping_amount = order["shipping_amount"]
@@ -1252,6 +1255,8 @@ def api_orders_summary():
 
         items = items_by_order.get(order["shopify_order_id"], [])
         arrived += 1
+        order_name = order["order_name"] or order["shopify_order_id"]
+        arrived_orders.append(order_name)
 
         # Same "closed" + "has billable items" test used for the Billing
         # view in /api/orders — an order counts as billed once every item
@@ -1261,8 +1266,22 @@ def api_orders_summary():
         billing_items = [i for i in items if i["status"] in ("purchased", "stock")]
         if closed and billing_items:
             billing += 1
+            billing_orders.append(order_name)
         else:
             pending += 1
+            pending_orders.append(order_name)
+
+    # Sorted by the numeric part of the order number where there is one
+    # (e.g. "#9474" before "#9480"), so the lists read in the same order
+    # someone picking through a batch would expect — anything without a
+    # clean number (a manual order's free-text ID) sorts after, by name.
+    def sort_key(name):
+        digits = re.sub(r"\D", "", name or "")
+        return (0, int(digits)) if digits else (1, name or "")
+
+    arrived_orders.sort(key=sort_key)
+    billing_orders.sort(key=sort_key)
+    pending_orders.sort(key=sort_key)
 
     cur.close()
     return jsonify(
@@ -1274,6 +1293,9 @@ def api_orders_summary():
             "arrived": arrived,
             "billing": billing,
             "pending": pending,
+            "arrived_orders": arrived_orders,
+            "billing_orders": billing_orders,
+            "pending_orders": pending_orders,
         }
     )
 
