@@ -243,10 +243,23 @@
       </div>
 
       <div id="summaryCustomRange" class="summary-custom-range" hidden>
-        <label class="date-filter-label" for="summaryFromInput">From</label>
-        <input id="summaryFromInput" type="date" class="date-filter-input">
-        <label class="date-filter-label" for="summaryToInput">To</label>
-        <input id="summaryToInput" type="date" class="date-filter-input">
+        <div class="summary-custom-row">
+          <label class="date-filter-label" for="summaryFromInput">From</label>
+          <input id="summaryFromInput" type="date" class="date-filter-input">
+          <label class="date-filter-label" for="summaryToInput">To</label>
+          <input id="summaryToInput" type="date" class="date-filter-input">
+        </div>
+        <div class="summary-custom-row">
+          <label class="date-filter-label" for="summaryOrderIdFromInput">Order ID from</label>
+          <input id="summaryOrderIdFromInput" type="text" inputmode="numeric" placeholder="e.g. 1041" class="date-filter-input summary-order-id-input">
+          <label class="date-filter-label" for="summaryOrderIdToInput">to</label>
+          <input id="summaryOrderIdToInput" type="text" inputmode="numeric" placeholder="e.g. 1050" class="date-filter-input summary-order-id-input">
+        </div>
+        <p class="modal-subtext summary-order-id-hint">
+          Not finishing a full day's orders in one go? Narrow to just the
+          order numbers you've handled — leave the dates blank to use the
+          Order ID range on its own.
+        </p>
         <button id="summaryApplyCustomBtn" class="btn btn-primary btn-small">Apply</button>
       </div>
 

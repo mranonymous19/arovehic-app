@@ -206,6 +206,8 @@ const summaryRangeButtons = document.querySelectorAll(".filter-btn[data-range]")
 const summaryCustomRange = document.getElementById("summaryCustomRange");
 const summaryFromInput = document.getElementById("summaryFromInput");
 const summaryToInput = document.getElementById("summaryToInput");
+const summaryOrderIdFromInput = document.getElementById("summaryOrderIdFromInput");
+const summaryOrderIdToInput = document.getElementById("summaryOrderIdToInput");
 const summaryApplyCustomBtn = document.getElementById("summaryApplyCustomBtn");
 const summaryRangeLabel = document.getElementById("summaryRangeLabel");
 const summaryArrivedVal = document.getElementById("summaryArrivedVal");
@@ -236,29 +238,58 @@ function summaryRangeDates(range) {
     return { from: localDateStr(from), to: localDateStr(today) };
   }
   if (range === "custom") {
-    return { from: summaryFromInput.value, to: summaryToInput.value };
+    return {
+      from: summaryFromInput.value,
+      to: summaryToInput.value,
+      orderIdFrom: summaryOrderIdFromInput.value.trim(),
+      orderIdTo: summaryOrderIdToInput.value.trim(),
+    };
   }
   // "today"
   return { from: localDateStr(today), to: localDateStr(today) };
 }
 
-function summaryRangeLabelText(range, from, to) {
+function summaryRangeLabelText(range, { from, to, orderIdFrom, orderIdTo }) {
   if (range === "today") return "Today";
   if (range === "yesterday") return "Yesterday";
   if (range === "7days") return "Last 7 days";
-  if (from && to) return from === to ? from : `${from} to ${to}`;
-  return "Pick a date range";
+  // custom
+  const parts = [];
+  if (from && to) parts.push(from === to ? from : `${from} to ${to}`);
+  if (orderIdFrom && orderIdTo) parts.push(`Order #${orderIdFrom}–#${orderIdTo}`);
+  return parts.length ? parts.join(" · ") : "Pick a date range and/or an Order ID range.";
 }
 
 async function loadSummary(range) {
-  const { from, to } = summaryRangeDates(range);
-  if (range === "custom" && (!from || !to)) {
-    summaryRangeLabel.textContent = "Pick a from and to date.";
-    return;
+  const { from, to, orderIdFrom, orderIdTo } = summaryRangeDates(range);
+
+  if (range === "custom") {
+    const hasDateRange = !!(from || to);
+    const hasOrderIdRange = !!(orderIdFrom || orderIdTo);
+    if (hasDateRange && (!from || !to)) {
+      summaryRangeLabel.textContent = "Fill in both a from and to date, or leave both blank.";
+      return;
+    }
+    if (hasOrderIdRange && (!orderIdFrom || !orderIdTo)) {
+      summaryRangeLabel.textContent = "Fill in both an Order ID from and to, or leave both blank.";
+      return;
+    }
+    if (!hasDateRange && !hasOrderIdRange) {
+      summaryRangeLabel.textContent = "Enter a date range and/or an Order ID range.";
+      return;
+    }
   }
-  summaryRangeLabel.textContent = summaryRangeLabelText(range, from, to);
+
+  summaryRangeLabel.textContent = summaryRangeLabelText(range, { from, to, orderIdFrom, orderIdTo });
+
+  const params = new URLSearchParams();
+  if (from) params.set("date_from", from);
+  if (to) params.set("date_to", to);
+  if (orderIdFrom) params.set("order_id_from", orderIdFrom);
+  if (orderIdTo) params.set("order_id_to", orderIdTo);
+
   try {
-    const res = await fetch(`/api/orders/summary?date_from=${from}&date_to=${to}`);
+    const res = await fetch(`/api/orders/summary?${params.toString()}`);
     if (!res.ok) return;
     const data = await res.json();
     summaryArrivedVal.textContent = data.arrived;
@@ -359,6 +390,7 @@ async function printInvoice(orderId, buttonEl) {
       return;
     }
     const invoiceNumber = res.headers.get("X-Invoice-Number");
+    const invoicePrintedBy = res.headers.get("X-Invoice-Printed-By");
     const blob = await res.blob();
     const blobUrl = URL.createObjectURL(blob);
     if (tab) tab.location = blobUrl;
@@ -368,7 +400,10 @@ async function printInvoice(orderId, buttonEl) {
     // full order-list reload.
     if (invoiceNumber) {
       const order = lastLoadedOrders.find((o) => o.order_id === orderId);
-      if (order) order.invoice_number = invoiceNumber;
+      if (order) {
+        order.invoice_number = invoiceNumber;
+        if (invoicePrintedBy) order.invoice_printed_by = invoicePrintedBy;
+      }
       renderOrders(filterByTrackQuery(lastLoadedOrders));
     }
   } catch (err) {
@@ -423,7 +458,7 @@ function renderOrders(orders) {
     );
     const invoiceBadge = showInvoiceInfo
       ? (order.invoice_number
-          ? `<span class="invoice-badge invoice-badge-printed">Invoice Printed · ${escapeHtml(order.invoice_number)}</span>`
+          ? `<span class="invoice-badge invoice-badge-printed">Invoice Printed · ${escapeHtml(order.invoice_number)}${order.invoice_printed_by ? ` · by ${escapeHtml(order.invoice_printed_by)}` : ""}</span>`
           : `<span class="invoice-badge invoice-badge-not-printed">Not Printed</span>`)
       : "";
     const amountBadge = (showInvoiceInfo && order.payment_type === "cod" && order.amount_to_receive != null)

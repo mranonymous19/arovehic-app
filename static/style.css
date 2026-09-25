@@ -135,11 +135,21 @@ a.btn { text-decoration: none; display: inline-block; }
 
 .summary-custom-range {
   display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 4px 0 14px;
+}
+
+.summary-custom-row {
+  display: flex;
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
-  margin: 4px 0 14px;
 }
+
+.summary-order-id-input { width: 100px; }
+
+.summary-order-id-hint { margin: 0; }
 
 .today-summary-stat {
   flex: 1 1 160px;

@@ -179,6 +179,7 @@ def init_db():
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS packed_by TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS packed_at TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_number TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_printed_by TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_date TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS tally_exported_at TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled BOOLEAN NOT NULL DEFAULT false;
@@ -1160,6 +1161,7 @@ def api_orders():
                 "cancelled_at": order["cancelled_at"],
                 "assigned_to": assigned_to,
                 "invoice_number": order["invoice_number"],
+                "invoice_printed_by": order["invoice_printed_by"],
                 "deleted_at": order["deleted_at"],
                 "items": [dict(i) for i in items],
             }
@@ -1172,25 +1174,49 @@ def api_orders():
 @app.route("/api/orders/summary", methods=["GET"])
 @login_required
 def api_orders_summary():
-    """Order-count summary for a date range: how many orders arrived, how
-    many of those have been moved through to Billing (purchased/in-stock,
-    nothing left pending), and how many are still pending. Takes
+    """Order-count summary for a date range and/or an Order ID range: how
+    many orders arrived, how many of those have been moved through to
+    Billing (purchased/in-stock, nothing left pending), and how many are
+    still pending.
+
     date_from/date_to ('YYYY-MM-DD', inclusive, from the browser's local
     date so "today" matches what the person looking at the screen
-    considers today) — both default to the server's UTC date if omitted.
+    considers today) filter by when the order came in. order_id_from/
+    order_id_to filter by the order's visible number (order_name, e.g.
+    "#1041") — handy for someone picking up a batch mid-day rather than a
+    full day's orders; only the digits are compared, so "#" or other
+    formatting doesn't matter. Any combination of the two can be given;
+    with nothing at all, defaults to today.
     """
     db = get_db()
     cur = db.cursor()
     today_str = datetime.now(timezone.utc).date().isoformat()
-    date_from = request.args.get("date_from") or today_str
-    date_to = request.args.get("date_to") or today_str
+    date_from = request.args.get("date_from")
+    date_to = request.args.get("date_to")
+    order_id_from_raw = request.args.get("order_id_from")
+    order_id_to_raw = request.args.get("order_id_to")
+    order_id_from = re.sub(r"\D", "", order_id_from_raw) if order_id_from_raw else ""
+    order_id_to = re.sub(r"\D", "", order_id_to_raw) if order_id_to_raw else ""
 
-    cur.execute(
-        "SELECT * FROM orders WHERE deleted_at IS NULL "
-        "AND NULLIF(created_at, '')::date >= %s::date "
-        "AND NULLIF(created_at, '')::date <= %s::date",
-        (date_from, date_to),
-    )
+    if not date_from and not date_to and not order_id_from and not order_id_to:
+        date_from = date_to = today_str
+
+    query = "SELECT * FROM orders WHERE deleted_at IS NULL"
+    params = []
+    if date_from:
+        query += " AND NULLIF(created_at, '')::date >= %s::date"
+        params.append(date_from)
+    if date_to:
+        query += " AND NULLIF(created_at, '')::date <= %s::date"
+        params.append(date_to)
+    if order_id_from:
+        query += " AND NULLIF(regexp_replace(order_name, '\\D', '', 'g'), '')::bigint >= %s"
+        params.append(int(order_id_from))
+    if order_id_to:
+        query += " AND NULLIF(regexp_replace(order_name, '\\D', '', 'g'), '')::bigint <= %s"
+        params.append(int(order_id_to))
+
+    cur.execute(query, params)
     orders = cur.fetchall()
 
     order_ids = [order["shopify_order_id"] for order in orders]
@@ -1240,7 +1266,15 @@ def api_orders_summary():
 
     cur.close()
     return jsonify(
-        {"date_from": date_from, "date_to": date_to, "arrived": arrived, "billing": billing, "pending": pending}
+        {
+            "date_from": date_from or None,
+            "date_to": date_to or None,
+            "order_id_from": order_id_from or None,
+            "order_id_to": order_id_to or None,
+            "arrived": arrived,
+            "billing": billing,
+            "pending": pending,
+        }
     )
 
 
@@ -1386,12 +1420,20 @@ def api_order_invoice(order_id):
         invoice_date = now.strftime("%-d-%b-%y")
         invoice_number = f"{invoice_prefix}/{seq}/{now.year}"
         cur.execute(
-            "UPDATE orders SET invoice_number = %s, invoice_date = %s WHERE shopify_order_id = %s",
-            (invoice_number, invoice_date, order_id),
+            "UPDATE orders SET invoice_number = %s, invoice_date = %s, invoice_printed_by = %s "
+            "WHERE shopify_order_id = %s",
+            (invoice_number, invoice_date, session["name"], order_id),
         )
     else:
         invoice_number = order["invoice_number"]
         invoice_date = order["invoice_date"]
+        # Reprinting updates who last touched it — "who gave the print" is
+        # answered by whoever most recently printed or reprinted it, not
+        # necessarily whoever first issued the invoice number.
+        cur.execute(
+            "UPDATE orders SET invoice_printed_by = %s WHERE shopify_order_id = %s",
+            (session["name"], order_id),
+        )
 
     # Log who printed (or reprinted) this invoice — the Billing view only
     # shows a Printed/Not-Printed badge, this is what answers "who printed
@@ -1449,7 +1491,8 @@ def api_order_invoice(order_id):
     # or a second round-trip to find out what number got assigned.
     response.headers["X-Invoice-Number"] = invoice_number
     response.headers["X-Invoice-Date"] = invoice_date
-    response.headers["Access-Control-Expose-Headers"] = "X-Invoice-Number, X-Invoice-Date"
+    response.headers["X-Invoice-Printed-By"] = session["name"]
+    response.headers["Access-Control-Expose-Headers"] = "X-Invoice-Number, X-Invoice-Date, X-Invoice-Printed-By"
     return response
 
 
