@@ -242,6 +242,9 @@ a.btn { text-decoration: none; display: inline-block; }
   flex-wrap: wrap;
   align-items: center;
 }
+.filters[hidden] {
+  display: none;
+}
 
 .order-track-input {
   flex: 1 1 260px;
