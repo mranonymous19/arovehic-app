@@ -154,6 +154,19 @@ async function loadMe() {
     invoiceFilterRow.hidden = false;
   }
 
+  if (currentRole === "staff") {
+    // Purchase staff work item-by-item off a single unified list (each
+    // item has its own status control right in the order row) — none of
+    // the Status/Invoice/Tally dropdowns are part of that workflow, so
+    // hide all three and just show every order, enforced server-side too
+    // in /api/orders (status=billing/closed is dropped for this role).
+    document.querySelector('label[for="statusFilterSelect"]').hidden = true;
+    statusFilterSelect.hidden = true;
+    statusFilterSelect.disabled = true;
+    currentFilter = "";
+    statusFilterSelect.value = "";
+  }
+
   updateTallyExportVisibility();
 
   if (currentRole === "packer") {

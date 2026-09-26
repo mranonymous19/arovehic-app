@@ -985,6 +985,16 @@ def api_orders():
     # in principle re-exported later).
     tally_filter = request.args.get("tally")  # 'exported' or 'not_exported'
 
+    # Purchase staff work item-by-item off a single unified list — the
+    # Billing/Closed groupings (and the Invoice/Tally sub-filters that only
+    # apply within Billing) aren't part of their workflow, so collapse
+    # those back to "all orders" for them, enforced here too and not just
+    # hidden in the UI.
+    if session.get("role") == "staff" and status_filter in ("billing", "closed"):
+        status_filter = None
+        invoice_filter = None
+        tally_filter = None
+
     # Trash, Refunded, and Cancelled are otherwise-hidden views. Owner gets
     # full access; telecaller can look but never edit (enforced by the
     # role checks on every write endpoint below), so they can check any
