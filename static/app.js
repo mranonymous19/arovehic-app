@@ -18,6 +18,7 @@ const ROLE_LABELS = {
 let currentFilter = "";
 let currentPaymentFilter = "";
 let currentInvoiceFilter = "";
+let currentTallyFilter = "";
 let currentDateFrom = "";
 let currentDateTo = "";
 let currentRole = null;
@@ -37,14 +38,15 @@ const closeSettingsBtn = document.getElementById("closeSettingsBtn");
 const statusFilterSelect = document.getElementById("statusFilterSelect");
 const paymentFilterButtons = document.querySelectorAll(".filter-btn[data-payment]");
 const invoiceFilterRow = document.getElementById("invoiceFilterRow");
-const invoiceFilterButtons = document.querySelectorAll(".filter-btn[data-invoice]");
+const invoiceFilterSelect = document.getElementById("invoiceFilterSelect");
+const tallyFilterSelect = document.getElementById("tallyFilterSelect");
+const billingResultCount = document.getElementById("billingResultCount");
 const dateFromInput = document.getElementById("dateFromInput");
 const dateToInput = document.getElementById("dateToInput");
 const clearDateFilterBtn = document.getElementById("clearDateFilterBtn");
 const exportPendingBtn = document.getElementById("exportPendingBtn");
 const tallyExportGroup = document.getElementById("tallyExportGroup");
 const exportTallyXmlBtn = document.getElementById("exportTallyXmlBtn");
-const exportTallyXlsxBtn = document.getElementById("exportTallyXlsxBtn");
 const tallyOnlyNew = document.getElementById("tallyOnlyNew");
 
 const codThresholdInput = document.getElementById("codThresholdInput");
@@ -163,6 +165,7 @@ async function loadMe() {
     currentInvoiceFilter = "printed";
     statusFilterSelect.value = "billing";
     statusFilterSelect.disabled = true;
+    invoiceFilterSelect.value = "printed";
     invoiceFilterRow.hidden = true;
   }
 }
@@ -188,6 +191,7 @@ async function loadOrders() {
   if (currentDateFrom) params.set("date_from", currentDateFrom);
   if (currentDateTo) params.set("date_to", currentDateTo);
   if (currentFilter === "billing" && currentInvoiceFilter) params.set("invoice", currentInvoiceFilter);
+  if (currentFilter === "billing" && currentTallyFilter) params.set("tally", currentTallyFilter);
   const url = params.toString() ? `/api/orders?${params.toString()}` : "/api/orders";
   const res = await fetch(url);
   const orders = await res.json();
@@ -435,6 +439,11 @@ function filterByTrackQuery(orders) {
       currentInvoiceFilter === "printed" ? !!order.invoice_number : !order.invoice_number
     );
   }
+  if (currentFilter === "billing" && currentTallyFilter) {
+    result = result.filter((order) =>
+      currentTallyFilter === "exported" ? !!order.tally_exported_at : !order.tally_exported_at
+    );
+  }
   return result;
 }
 
@@ -518,6 +527,16 @@ async function printInvoice(orderId, buttonEl) {
 function renderOrders(orders) {
   ordersContainer.innerHTML = "";
 
+  // Running count of whatever's currently in view in Billing — most useful
+  // with the Invoice filter set to "Not printed" (or Tally set to "Not
+  // exported"): print/export them one by one and watch this count run down
+  // to 0, so you can tell for certain when you've caught every last one.
+  if (currentFilter === "billing") {
+    billingResultCount.textContent = orders.length === 1 ? "1 order" : `${orders.length} orders`;
+  } else {
+    billingResultCount.textContent = "";
+  }
+
   if (!orders.length) {
     if (orderTrackQuery.trim()) {
       ordersContainer.innerHTML = `
@@ -568,6 +587,11 @@ function renderOrders(orders) {
     const billedDateBadge = (showInvoiceInfo && order.billed_at)
       ? `<span class="invoice-badge billed-date-badge">Billed · ${new Date(order.billed_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</span>`
       : "";
+    const tallyBadge = (showInvoiceInfo && order.invoice_number)
+      ? (order.tally_exported_at
+          ? `<span class="invoice-badge billed-date-badge">Exported · ${new Date(order.tally_exported_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</span>`
+          : `<span class="invoice-badge invoice-badge-not-printed">Not exported</span>`)
+      : "";
     const billingEligible = (order.items || []).some((i) => i.status === "purchased" || i.status === "stock");
     // Cancelling is the packer/owner-only alternative to packing — same
     // permission and eligibility as the Packed checkbox, so it shows up
@@ -595,6 +619,7 @@ function renderOrders(orders) {
         ${invoiceBadge}
         ${amountBadge}
         ${billedDateBadge}
+        ${tallyBadge}
         ${packedReadonlyBadge}
         ${cancelledBadge}
         ${assignedTo}
@@ -947,7 +972,10 @@ statusFilterSelect.addEventListener("change", () => {
   invoiceFilterRow.hidden = currentFilter !== "billing";
   if (currentFilter !== "billing") {
     currentInvoiceFilter = "";
-    invoiceFilterButtons.forEach((b) => b.classList.toggle("active", b.dataset.invoice === ""));
+    currentTallyFilter = "";
+    invoiceFilterSelect.value = "";
+    tallyFilterSelect.value = "";
+    tallyOnlyNew.disabled = false;
   }
   exportPendingBtn.hidden = currentFilter !== "pending";
   updateTallyExportVisibility();
@@ -963,19 +991,34 @@ paymentFilterButtons.forEach((btn) => {
   });
 });
 
-invoiceFilterButtons.forEach((btn) => {
-  btn.addEventListener("click", () => {
-    invoiceFilterButtons.forEach((b) => b.classList.remove("active"));
-    btn.classList.add("active");
-    currentInvoiceFilter = btn.dataset.invoice;
-    renderOrders(filterByTrackQuery(lastLoadedOrders));
-  });
+invoiceFilterSelect.addEventListener("change", () => {
+  currentInvoiceFilter = invoiceFilterSelect.value;
+  renderOrders(filterByTrackQuery(lastLoadedOrders));
+});
+
+tallyFilterSelect.addEventListener("change", () => {
+  currentTallyFilter = tallyFilterSelect.value;
+  // "Not exported" IS the "give me everything not yet sent" view — tie the
+  // checkbox to it so it's visibly on and can't be accidentally unticked
+  // while that's what's selected (downloadTally forces only_new either way,
+  // this is just so the UI doesn't look like it's about to export duplicates).
+  if (currentTallyFilter === "not_exported") {
+    tallyOnlyNew.checked = true;
+    tallyOnlyNew.disabled = true;
+  } else {
+    tallyOnlyNew.disabled = false;
+  }
+  renderOrders(filterByTrackQuery(lastLoadedOrders));
 });
 
 trashBtn.addEventListener("click", () => {
   currentFilter = "trash";
   updateTallyExportVisibility();
   currentInvoiceFilter = "";
+  currentTallyFilter = "";
+  invoiceFilterSelect.value = "";
+  tallyFilterSelect.value = "";
+  tallyOnlyNew.disabled = false;
   statusFilterSelect.value = "";
   invoiceFilterRow.hidden = true;
   loadOrders();
@@ -985,6 +1028,10 @@ cancelledBtn.addEventListener("click", () => {
   currentFilter = "cancelled";
   updateTallyExportVisibility();
   currentInvoiceFilter = "";
+  currentTallyFilter = "";
+  invoiceFilterSelect.value = "";
+  tallyFilterSelect.value = "";
+  tallyOnlyNew.disabled = false;
   statusFilterSelect.value = "";
   invoiceFilterRow.hidden = true;
   loadOrders();
@@ -1035,7 +1082,11 @@ async function downloadTally(kind, buttonEl) {
   const params = new URLSearchParams();
   if (currentDateFrom) params.set("date_from", currentDateFrom);
   if (currentDateTo) params.set("date_to", currentDateTo);
-  if (tallyOnlyNew.checked) params.set("only_new", "1");
+  // Viewing the "Not exported" filter means the whole point of this export
+  // is "everything I haven't sent yet" — force only_new regardless of the
+  // checkbox, so a monthly export from that filter can never duplicate an
+  // invoice even if the checkbox was left unticked.
+  if (tallyOnlyNew.checked || currentTallyFilter === "not_exported") params.set("only_new", "1");
 
   const original = buttonEl.textContent;
   buttonEl.disabled = true;
@@ -1070,7 +1121,6 @@ async function downloadTally(kind, buttonEl) {
 }
 
 exportTallyXmlBtn.addEventListener("click", (e) => downloadTally("xml", e.currentTarget));
-exportTallyXlsxBtn.addEventListener("click", (e) => downloadTally("xlsx", e.currentTarget));
 
 exportPendingBtn.addEventListener("click", () => {
   const params = new URLSearchParams();

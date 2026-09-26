@@ -979,6 +979,12 @@ def api_orders():
         status_filter = "billing"
         invoice_filter = "printed"
 
+    # Same idea as invoice_filter above, but for whether an order's
+    # invoice has already gone out in a Tally export — independent of
+    # printed status (an invoice can be printed but not yet exported, or
+    # in principle re-exported later).
+    tally_filter = request.args.get("tally")  # 'exported' or 'not_exported'
+
     # Trash, Refunded, and Cancelled are otherwise-hidden views. Owner gets
     # full access; telecaller can look but never edit (enforced by the
     # role checks on every write endpoint below), so they can check any
@@ -1083,6 +1089,11 @@ def api_orders():
         if invoice_filter == "not_printed" and order["invoice_number"]:
             continue
 
+        if tally_filter == "exported" and not order["tally_exported_at"]:
+            continue
+        if tally_filter == "not_exported" and order["tally_exported_at"]:
+            continue
+
         if status_filter == "closed":
             # Every item in the order, as long as the order itself is closed.
             if not closed:
@@ -1162,6 +1173,7 @@ def api_orders():
                 "assigned_to": assigned_to,
                 "invoice_number": order["invoice_number"],
                 "invoice_printed_by": order["invoice_printed_by"],
+                "tally_exported_at": order["tally_exported_at"],
                 "deleted_at": order["deleted_at"],
                 "items": [dict(i) for i in items],
             }

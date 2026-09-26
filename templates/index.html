@@ -43,10 +43,19 @@
   </div>
 
   <div id="invoiceFilterRow" class="filters" hidden>
-    <span class="date-filter-label">Invoice</span>
-    <button class="filter-btn active" data-invoice="">All</button>
-    <button class="filter-btn" data-invoice="printed">Printed</button>
-    <button class="filter-btn" data-invoice="not_printed">Not printed</button>
+    <label class="date-filter-label" for="invoiceFilterSelect">Invoice</label>
+    <select id="invoiceFilterSelect" class="status-filter-select">
+      <option value="">All</option>
+      <option value="printed">Printed</option>
+      <option value="not_printed">Not printed</option>
+    </select>
+    <label class="date-filter-label" for="tallyFilterSelect">Tally XML</label>
+    <select id="tallyFilterSelect" class="status-filter-select">
+      <option value="">All</option>
+      <option value="exported">Exported</option>
+      <option value="not_exported">Not exported</option>
+    </select>
+    <span id="billingResultCount" class="billing-result-count"></span>
   </div>
 
   <div class="filters">
@@ -58,8 +67,7 @@
     <button id="exportPendingBtn" class="btn btn-ghost btn-small" hidden>Export Pending (Excel)</button>
     <span id="tallyExportGroup" class="tally-export-group" hidden>
       <button id="exportTallyXmlBtn" class="btn btn-ghost btn-small">Tally XML</button>
-      <button id="exportTallyXlsxBtn" class="btn btn-ghost btn-small">Tally Excel</button>
-      <label class="date-filter-label tally-only-new" title="Skip invoices already exported, and mark these as exported">
+      <label class="date-filter-label tally-only-new" title="Skip invoices already exported, and mark these as exported. Auto-on when the Tally XML filter above is set to 'Not exported'.">
         <input id="tallyOnlyNew" type="checkbox"> Only new
       </label>
     </span>
