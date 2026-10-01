@@ -186,6 +186,10 @@ def init_db():
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_reason TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_at TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_cancelled BOOLEAN NOT NULL DEFAULT false;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_cancelled_reason TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_cancelled_by TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_cancelled_at TEXT;
         """
     )
     # Migration: tables created before the 'packer'/'accounts' roles existed
@@ -1098,6 +1102,8 @@ def api_orders():
             continue
         if invoice_filter == "not_printed" and order["invoice_number"]:
             continue
+        if invoice_filter == "bill_cancelled" and not order["bill_cancelled"]:
+            continue
 
         if tally_filter == "exported" and not order["tally_exported_at"]:
             continue
@@ -1181,6 +1187,10 @@ def api_orders():
                 "cancelled_by": order["cancelled_by"],
                 "cancelled_at": order["cancelled_at"],
                 "assigned_to": assigned_to,
+                "bill_cancelled": order["bill_cancelled"],
+                "bill_cancelled_reason": order["bill_cancelled_reason"],
+                "bill_cancelled_by": order["bill_cancelled_by"],
+                "bill_cancelled_at": order["bill_cancelled_at"],
                 "invoice_number": order["invoice_number"],
                 "invoice_printed_by": order["invoice_printed_by"],
                 "tally_exported_at": order["tally_exported_at"],
@@ -1414,6 +1424,10 @@ def api_order_invoice(order_id):
         cur.close()
         return jsonify({"error": "Order not found"}), 404
 
+    if order["bill_cancelled"]:
+        cur.close()
+        return jsonify({"error": "This bill is marked Cancelled — restore it first to print"}), 400
+
     # Staff can print the first copy of an invoice, but reprinting one
     # that's already been printed (a new invoice number is never issued
     # for it — see below) is an accounts/owner action only.
@@ -1551,6 +1565,9 @@ def _collect_invoices_for_tally(date_from, date_to, only_new):
     db = get_db()
     cur = db.cursor()
     query = "SELECT * FROM orders WHERE deleted_at IS NULL AND invoice_number IS NOT NULL AND invoice_number <> ''"
+    # Cancelled bills were re-created directly in Tally, so exporting them
+    # would duplicate the voucher there.
+    query += " AND bill_cancelled = false"
     if only_new:
         query += " AND (tally_exported_at IS NULL OR tally_exported_at = '')"
     cur.execute(query)
@@ -1680,6 +1697,52 @@ def api_export_tally_xlsx():
     resp.headers["X-Invoice-Count"] = str(len(records))
     resp.headers["Access-Control-Expose-Headers"] = "X-Invoice-Count"
     return resp
+
+
+@app.route("/api/orders/<order_id>/bill-cancelled", methods=["POST"])
+@accounts_or_owner_required
+def api_update_bill_cancelled(order_id):
+    """Accounts/owner. Marks an order's BILL (printed or not yet printed) as
+    cancelled — e.g. item rates went up and the bill is re-created directly
+    in Tally. The order itself stays active. Cancelled bills are skipped by
+    the Tally XML/Excel export so they don't get duplicated in Tally."""
+    data = request.get_json(force=True) or {}
+    if "cancelled" not in data:
+        return jsonify({"error": "cancelled is required"}), 400
+    cancelled = bool(data.get("cancelled"))
+    reason = (data.get("reason") or "").strip()
+    if cancelled and not reason:
+        return jsonify({"error": "A reason is required to cancel a bill"}), 400
+
+    who = session.get("name", "")
+    now = datetime.now(timezone.utc).isoformat()
+    vals = (cancelled, reason if cancelled else None, who if cancelled else None, now if cancelled else None)
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute(
+        "UPDATE orders SET bill_cancelled = %s, bill_cancelled_reason = %s, "
+        "bill_cancelled_by = %s, bill_cancelled_at = %s "
+        "WHERE shopify_order_id = %s RETURNING order_name, invoice_number",
+        vals + (order_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        cur.close()
+        return jsonify({"error": "Order not found"}), 404
+    label = row["invoice_number"] or "(not printed)"
+    log_activity(
+        cur, None, row["order_name"] or order_id, "bill_cancelled_update",
+        f"{who} marked bill {label} of order {row['order_name'] or order_id} as "
+        f"{'cancelled (' + reason + ')' if cancelled else 'active again'}",
+        order_id=order_id,
+    )
+    db.commit()
+    cur.close()
+    return jsonify({
+        "ok": True, "order_id": order_id, "bill_cancelled": cancelled,
+        "bill_cancelled_reason": vals[1], "bill_cancelled_by": vals[2], "bill_cancelled_at": vals[3],
+    })
 
 
 @app.route("/api/orders/<order_id>", methods=["DELETE"])

@@ -449,7 +449,9 @@ function filterByTrackQuery(orders) {
   }
   if (currentFilter === "billing" && currentInvoiceFilter) {
     result = result.filter((order) =>
-      currentInvoiceFilter === "printed" ? !!order.invoice_number : !order.invoice_number
+      currentInvoiceFilter === "printed" ? !!order.invoice_number
+        : currentInvoiceFilter === "bill_cancelled" ? !!order.bill_cancelled
+        : !order.invoice_number
     );
   }
   if (currentFilter === "billing" && currentTallyFilter) {
@@ -605,6 +607,10 @@ function renderOrders(orders) {
           ? `<span class="invoice-badge billed-date-badge">Exported · ${new Date(order.tally_exported_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</span>`
           : `<span class="invoice-badge invoice-badge-not-printed">Not exported</span>`)
       : "";
+    const billBadge = (showInvoiceInfo && order.bill_cancelled)
+      ? `<span class="invoice-badge cancelled-badge" title="${escapeHtml(order.bill_cancelled_reason || "")}">Bill Cancelled${order.bill_cancelled_reason ? ": " + escapeHtml(order.bill_cancelled_reason) : ""}</span>`
+      : "";
+    const canCancelBill = showInvoiceInfo && (currentRole === "owner" || currentRole === "accounts");
     const billingEligible = (order.items || []).some((i) => i.status === "purchased" || i.status === "stock");
     // Cancelling is the packer/owner-only alternative to packing — same
     // permission and eligibility as the Packed checkbox, so it shows up
@@ -635,12 +641,14 @@ function renderOrders(orders) {
         ${tallyBadge}
         ${packedReadonlyBadge}
         ${cancelledBadge}
+        ${billBadge}
         ${assignedTo}
       </span>
       <span class="order-head-actions">
         ${canPack ? `<label class="order-packed-checkbox"><input type="checkbox" class="order-packed-input" ${order.packed ? "checked" : ""} /> Packed</label>` : ""}
         ${canManageCancel ? `<label class="order-cancelled-checkbox"><input type="checkbox" class="order-cancelled-input" ${order.cancelled ? "checked" : ""} /> Cancelled</label>` : ""}
-        ${canPrintInvoice ? `<button type="button" class="btn btn-ghost btn-small order-invoice-link" data-order-id="${escapeHtml(order.order_id)}">${order.invoice_number ? "Reprint Invoice" : "Print Invoice"}</button>` : ""}
+        ${canCancelBill ? `<button type="button" class="btn btn-ghost btn-small btn-danger order-bill-cancel-link">${order.bill_cancelled ? "Restore Bill" : "Cancel Bill"}</button>` : ""}
+        ${canPrintInvoice && !order.bill_cancelled ? `<button type="button" class="btn btn-ghost btn-small order-invoice-link" data-order-id="${escapeHtml(order.order_id)}">${order.invoice_number ? "Reprint Invoice" : "Print Invoice"}</button>` : ""}
         ${currentRole === "owner" ? `<button type="button" class="order-history-link" data-order-id="${escapeHtml(order.order_id)}">History</button>` : ""}
         ${currentRole === "owner" && currentFilter === "trash" ? `<button type="button" class="btn btn-primary btn-small order-restore-link" data-order-id="${escapeHtml(order.order_id)}">Restore</button>` : ""}
         ${currentRole === "owner" && currentFilter !== "trash" ? `<button type="button" class="btn btn-ghost btn-small btn-danger order-delete-link" data-order-id="${escapeHtml(order.order_id)}">Delete</button>` : ""}
@@ -669,7 +677,20 @@ function renderOrders(orders) {
         }
       });
     }
-    if (canPrintInvoice) {
+    if (canCancelBill) {
+      head.querySelector(".order-bill-cancel-link").addEventListener("click", () => {
+        const label = order.invoice_number ? `bill ${order.invoice_number}` : `the bill of ${order.order_name || order.order_id}`;
+        if (order.bill_cancelled) {
+          if (!confirm(`Restore ${label}? It will be included in Tally exports again.`)) return;
+          updateBillCancelled(order.order_id, false, "");
+        } else {
+          const reason = prompt(`Reason for cancelling ${label} (it will be skipped in Tally export):`);
+          if (!reason || !reason.trim()) return;
+          updateBillCancelled(order.order_id, true, reason.trim());
+        }
+      });
+    }
+    if (canPrintInvoice && !order.bill_cancelled) {
       head.querySelector(".order-invoice-link").addEventListener("click", (e) => {
         printInvoice(order.order_id, e.currentTarget);
       });
@@ -781,6 +802,29 @@ async function updateOrderCancelled(orderId, cancelled, reason, checkboxEl) {
   // mutating the one field updateOrderPacked does.
   renderOrders(filterByTrackQuery(lastLoadedOrders));
   showMessage(cancelled ? "Order marked as cancelled" : "Cancelled status removed");
+}
+
+async function updateBillCancelled(orderId, cancelled, reason) {
+  const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/bill-cancelled`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cancelled, reason }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    showMessage(err.error || "Could not update bill status.", true);
+    return;
+  }
+  const data = await res.json();
+  const order = lastLoadedOrders.find((o) => o.order_id === orderId);
+  if (order) {
+    order.bill_cancelled = data.bill_cancelled;
+    order.bill_cancelled_reason = data.bill_cancelled_reason;
+    order.bill_cancelled_by = data.bill_cancelled_by;
+    order.bill_cancelled_at = data.bill_cancelled_at;
+  }
+  renderOrders(filterByTrackQuery(lastLoadedOrders));
+  showMessage(cancelled ? "Bill cancelled — it won't be in the Tally export" : "Bill restored");
 }
 
 async function updatePurchaseAmount(itemId, value, inputEl) {
