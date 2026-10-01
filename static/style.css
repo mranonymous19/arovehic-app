@@ -917,3 +917,20 @@ main {
   gap: 4px;
   cursor: pointer;
 }
+
+.price-edited-badge {
+  background: #fff4d6;
+  color: #8a5a00;
+  border-radius: 6px;
+  padding: 1px 6px;
+  font-size: 12px;
+}
+.item-price-edit-btn {
+  background: none;
+  border: none;
+  color: var(--accent, #2563eb);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
+  text-decoration: underline;
+}

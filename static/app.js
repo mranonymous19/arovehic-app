@@ -713,6 +713,33 @@ function renderOrders(orders) {
   }
 }
 
+// Only accounts/owner, and only inside Billing — that's where invoices are
+// made and the figures that go to Tally are locked in.
+function canEditPrice() {
+  return currentFilter === "billing" && (currentRole === "owner" || currentRole === "accounts");
+}
+
+async function updateItemPrice(itemId, value) {
+  const res = await fetch(`/api/items/${encodeURIComponent(itemId)}/price`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ price: value }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    showMessage(err.error || "Could not update price.", true);
+    return;
+  }
+  const data = await res.json();
+  await loadOrders();
+  showMessage(
+    data.already_exported
+      ? "Price updated — NOTE: this order was already exported to Tally with the old price."
+      : "Price updated — invoice and Tally export will use it.",
+    !!data.already_exported
+  );
+}
+
 function renderItemRow(item) {
   const row = document.createElement("div");
   row.className = "item-row";
@@ -720,8 +747,16 @@ function renderItemRow(item) {
   const titleBlock = document.createElement("div");
   titleBlock.innerHTML = `
     <div class="item-title">${escapeHtml(item.title)}${item.variant_title ? ` — ${escapeHtml(item.variant_title)}` : ""}</div>
-    <div class="item-meta">qty ${item.quantity} · ${escapeHtml(item.price || "")}${item.vendor ? " · " + escapeHtml(item.vendor) : ""}</div>
+    <div class="item-meta">qty ${item.quantity} · ${escapeHtml(item.price || "")}${item.price_edited ? ` <span class="price-edited-badge" title="Shopify price: ${escapeHtml(item.original_price || "")}">edited (was ${escapeHtml(item.original_price || "")})</span>` : ""}${item.vendor ? " · " + escapeHtml(item.vendor) : ""}${canEditPrice() ? ` · <button type="button" class="item-price-edit-btn">Edit price</button>` : ""}</div>
   `;
+  const priceBtn = titleBlock.querySelector(".item-price-edit-btn");
+  if (priceBtn) {
+    priceBtn.addEventListener("click", () => {
+      const v = prompt(`New price per unit (₹, GST-inclusive) for "${item.title}"\nShopify price: ${item.original_price || item.price}`, item.price || "");
+      if (v === null || v.trim() === "") return;
+      updateItemPrice(item.id, v.trim());
+    });
+  }
 
   const editable = canEditStatus();
 

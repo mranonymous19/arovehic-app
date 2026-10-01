@@ -186,6 +186,9 @@ def init_db():
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_reason TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_by TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_at TEXT;
+        ALTER TABLE items ADD COLUMN IF NOT EXISTS original_price TEXT;
+        ALTER TABLE items ADD COLUMN IF NOT EXISTS price_edited BOOLEAN NOT NULL DEFAULT false;
+        ALTER TABLE items ADD COLUMN IF NOT EXISTS price_edited_by TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_cancelled BOOLEAN NOT NULL DEFAULT false;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_cancelled_reason TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_cancelled_by TEXT;
@@ -805,8 +808,11 @@ def api_sync():
                 # Keep whatever status was already set; just refresh details.
                 cur.execute(
                     "UPDATE items SET shopify_order_id=%s, title=%s, variant_title=%s, "
-                    "quantity=%s, price=%s, vendor=%s, updated_at=%s WHERE id=%s",
-                    (order_id, title, variant_title, quantity, price, vendor, now, item_id),
+                    "quantity=%s, vendor=%s, updated_at=%s, "
+                    "price = CASE WHEN price_edited THEN price ELSE %s END, "
+                    "original_price = CASE WHEN price_edited THEN %s ELSE original_price END "
+                    "WHERE id=%s",
+                    (order_id, title, variant_title, quantity, vendor, now, price, price, item_id),
                 )
             else:
                 cur.execute(
@@ -958,6 +964,21 @@ def resolve_payment_type(order_row, cod_threshold):
     if shipping_amount is None:
         return None
     return "cod" if float(shipping_amount) >= cod_threshold else "prepaid"
+
+
+def price_edit_delta(billing_items):
+    """How much the manually edited item prices changed the order total vs
+    what Shopify billed (sum of (new - original) x qty). Shopify's
+    balance_due still reflects the original prices, so COD "Amount to be
+    Received" is adjusted by this."""
+    delta = 0.0
+    for i in billing_items:
+        if i.get("price_edited") and i.get("original_price") not in (None, ""):
+            try:
+                delta += (float(i["price"] or 0) - float(i["original_price"])) * (i["quantity"] or 0)
+            except (TypeError, ValueError):
+                pass
+    return delta
 
 
 @app.route("/api/orders", methods=["GET"])
@@ -1149,7 +1170,8 @@ def api_orders():
             if balance_due is not None:
                 na_items = [i for i in all_order_items if i["status"] == "na"]
                 na_value = sum(float(i["price"] or 0) * (i["quantity"] or 0) for i in na_items)
-                amount_to_receive = round(max(0.0, float(balance_due) - na_value), 2)
+                amount_to_receive = round(max(0.0, float(balance_due) - na_value
+                                              + price_edit_delta([dict(i) for i in billing_items_for_amount])), 2)
             else:
                 amount_to_receive = grand_total
 
@@ -1522,6 +1544,10 @@ def api_order_invoice(order_id):
             except (TypeError, ValueError):
                 pass
         order_dict["balance_due"] = max(0.0, float(order_dict["balance_due"]) - na_value)
+    if order_dict.get("balance_due") is not None:
+        order_dict["balance_due"] = max(
+            0.0, float(order_dict["balance_due"]) + price_edit_delta([dict(i) for i in billing_items])
+        )
 
     # Persist the final calculated Amount to be Received into Supabase at
     # the moment it's locked in for the invoice — same reasoning as the
@@ -1899,6 +1925,55 @@ def api_update_item_purchase_amount(item_id):
     db.commit()
     cur.close()
     return jsonify({"ok": True, "id": item_id, "purchase_amount": purchase_amount})
+
+
+@app.route("/api/items/<item_id>/price", methods=["POST"])
+@accounts_or_owner_required
+def api_update_item_price(item_id):
+    """Accounts/owner. Edit an item's selling price (per unit, GST-inclusive)
+    when the rate goes up after the order. The edited price is what the
+    invoice PDF, the COD amount and the Tally export use — not Shopify's.
+    Entering the original Shopify price again clears the edit."""
+    data = request.get_json(force=True) or {}
+    try:
+        new_price = round(float(data.get("price")), 2)
+    except (TypeError, ValueError):
+        return jsonify({"error": "price must be a number"}), 400
+    if new_price < 0:
+        return jsonify({"error": "price can't be negative"}), 400
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT * FROM items WHERE id = %s", (item_id,))
+    it = cur.fetchone()
+    if it is None:
+        cur.close()
+        return jsonify({"error": "item not found"}), 404
+
+    original = it["original_price"] if it["original_price"] not in (None, "") else it["price"]
+    try:
+        is_edited = abs(new_price - float(original or 0)) > 0.001
+    except (TypeError, ValueError):
+        is_edited = True
+    now = datetime.now(timezone.utc).isoformat()
+    cur.execute(
+        "UPDATE items SET price = %s, original_price = %s, price_edited = %s, "
+        "price_edited_by = %s, updated_at = %s WHERE id = %s",
+        (f"{new_price:.2f}", original, is_edited, session["name"] if is_edited else None, now, item_id),
+    )
+    cur.execute("SELECT order_name, invoice_number, tally_exported_at FROM orders WHERE shopify_order_id = %s",
+                (it["shopify_order_id"],))
+    o = cur.fetchone() or {}
+    log_activity(cur, item_id, it["title"], "price_update",
+                 f"{session['name']} changed price: {it['price']} -> {new_price:.2f} (Shopify price {original})",
+                 order_id=it["shopify_order_id"])
+    db.commit()
+    cur.close()
+    return jsonify({
+        "ok": True, "id": item_id, "price": f"{new_price:.2f}", "original_price": original,
+        "price_edited": is_edited,
+        "already_exported": bool(o.get("tally_exported_at")) if o else False,
+    })
 
 
 @app.route("/api/items/<item_id>/packed", methods=["POST"])
