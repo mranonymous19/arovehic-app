@@ -3,30 +3,90 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Log in — Shopify Purchase Tracker</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<title>Sign in — Arovehic</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Inter:wght@400;500;600&display=swap">
+<style>
+:root{--bg:#0e1217;--panel:#151b22;--line:#2a333d;--text:#eef0f2;--muted:#8d97a3;--amber:#f0771f;--amber-d:#c75d10}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif;display:grid;grid-template-columns:1fr minmax(380px,460px);overflow:hidden}
+.stage{position:relative;overflow:hidden;background:linear-gradient(90deg,rgba(14,18,23,.55),rgba(14,18,23,.85)),url('https://images.unsplash.com/photo-1698856712618-448b660a8d1f?fm=jpg&q=75&w=2560&fit=max') center/cover no-repeat,radial-gradient(60% 70% at 40% 50%,#1b2430 0%,var(--bg) 70%)}
+#scene{position:absolute;inset:0;width:100%;height:100%;display:block}
+.brand{position:absolute;left:40px;top:34px;display:flex;align-items:center;gap:12px;font:600 20px Sora,sans-serif;letter-spacing:.02em;z-index:2}
+.mark{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--amber),var(--amber-d));display:grid;place-items:center;font:700 18px Sora,sans-serif;color:#1b0e03}
+.credit{position:absolute;right:14px;bottom:10px;z-index:2;font-size:11px;color:#6d7885}.credit a{color:inherit}
+.tag{position:absolute;left:40px;bottom:40px;max-width:420px;z-index:2}
+.tag h2{font:600 28px/1.2 Sora,sans-serif;margin:0 0 8px}
+.tag p{margin:0;color:var(--muted);font-size:14px;line-height:1.6}
+.side{display:flex;align-items:center;justify-content:center;padding:32px;background:var(--panel);border-left:1px solid var(--line);position:relative;z-index:3}
+.card{width:100%;max-width:340px}
+.card h1{font:600 26px Sora,sans-serif;margin:0 0 6px}
+.sub{color:var(--muted);font-size:14px;margin:0 0 28px}
+label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px}
+.field{margin-bottom:18px;position:relative}
+input{width:100%;padding:13px 14px;background:#0f141a;border:1px solid var(--line);border-radius:10px;color:var(--text);font:15px Inter,sans-serif;transition:border-color .15s,box-shadow .15s}
+input::placeholder{color:#546070}
+input:focus{outline:none;border-color:var(--amber);box-shadow:0 0 0 3px rgba(240,119,31,.2)}
+.toggle{position:absolute;right:10px;top:33px;background:none;border:0;color:var(--muted);font:500 12px Inter,sans-serif;cursor:pointer;padding:4px 6px;border-radius:6px}
+.toggle:hover{color:var(--text)}
+.toggle:focus-visible,button.go:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+button.go{width:100%;margin-top:6px;padding:14px;border:0;border-radius:10px;background:linear-gradient(135deg,var(--amber),var(--amber-d));color:#1b0e03;font:600 15px Inter,sans-serif;cursor:pointer;transition:transform .12s,filter .12s}
+button.go:hover{filter:brightness(1.08)}
+button.go:active{transform:translateY(1px)}
+.err{background:rgba(220,70,70,.12);border:1px solid rgba(220,70,70,.5);color:#ff9d9d;border-radius:10px;padding:11px 13px;font-size:13px;margin-bottom:18px}
+.foot{margin-top:28px;font-size:12px;color:#5b6674}
+@media(max-width:820px){body{grid-template-columns:1fr;grid-template-rows:34vh 1fr;overflow:auto}.tag{display:none}.brand{left:20px;top:18px}.side{border-left:0;border-top:1px solid var(--line);align-items:flex-start;padding-top:28px}}
+</style>
 </head>
-<body class="login-body">
-  <div class="login-wrap">
-    <div class="login-card">
-      <h1 class="login-title">Shopify Purchase Tracker</h1>
+<body>
+  <section class="stage" aria-hidden="true">
+    <canvas id="scene"></canvas>
+    <div class="brand"><span class="mark">A</span>Arovehic</div>
+    <div class="tag">
+      <h2>Every order, from checkout to doorstep.</h2>
+      <p>Track purchases, billing and dispatch for the whole team in one place.</p>
+    </div>
+    <div class="credit">Photo by <a href="https://unsplash.com/photos/z7pg60IYO4I" target="_blank" rel="noopener">Gerhard Siebert</a> on Unsplash</div>
+  </section>
+
+  <main class="side">
+    <div class="card">
+      <h1>Welcome back</h1>
+      <p class="sub">Sign in to the order desk.</p>
 
       {% if error %}
-      <div class="banner error login-banner">{{ error }}</div>
+      <div class="err" role="alert">{{ error }}</div>
       {% endif %}
 
-      <form method="POST" action="{{ url_for('login') }}" class="login-form">
-        <div class="form-row">
+      <form method="POST" action="{{ url_for('login') }}">
+        <div class="field">
           <label for="name">Name</label>
           <input id="name" type="text" name="name" required autofocus autocomplete="username" placeholder="Your name">
         </div>
-        <div class="form-row">
+        <div class="field">
           <label for="password">Password</label>
-          <input id="password" type="password" name="password" required autocomplete="current-password" placeholder="••••••••">
+          <input id="password" type="password" name="password" required autocomplete="current-password" placeholder="Your password">
+          <button type="button" class="toggle" id="pwToggle" aria-label="Show password">Show</button>
         </div>
-        <button type="submit" class="btn btn-primary login-btn">Log in</button>
+        <button type="submit" class="go">Sign in</button>
       </form>
+      <p class="foot">Arovehic automotive spare parts</p>
     </div>
-  </div>
+  </main>
+
+  <script src="{{ url_for('static', filename='vendor/three.min.js') }}"></script>
+  <script src="{{ url_for('static', filename='login3d.js') }}"></script>
+  <script>
+    (function(){
+      var t=document.getElementById('pwToggle'),p=document.getElementById('password');
+      t.addEventListener('click',function(){
+        var show=p.type==='password';
+        p.type=show?'text':'password';
+        t.textContent=show?'Hide':'Show';
+        t.setAttribute('aria-label',show?'Hide password':'Show password');
+      });
+    })();
+  </script>
 </body>
 </html>

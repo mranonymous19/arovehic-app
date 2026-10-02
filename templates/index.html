@@ -3,12 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Shopify Purchase Tracker</title>
+<title>Arovehic — Order Desk</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='theme.css') }}">
 </head>
 <body>
   <header class="topbar">
-    <h1>Shopify Purchase Tracker</h1>
+    <h1><span class="brand-mark">A</span>Arovehic Order Desk</h1>
+    <button type="button" id="menuToggle" class="menu-toggle" aria-label="Open menu" aria-expanded="false">&#9776;</button>
     <div class="topbar-actions">
       <button id="summaryBtn" class="btn btn-ghost" hidden>Summary</button>
       <button id="syncBtn" class="btn btn-primary" hidden>Sync from Shopify</button>
@@ -23,6 +25,15 @@
       <a href="{{ url_for('logout') }}" class="btn btn-ghost">Log out</a>
     </div>
   </header>
+
+  <section id="heroBanner" class="hero" aria-label="Page banner">
+    <div class="hero-text">
+      <h2 id="heroTitle">Order desk</h2>
+      <p id="heroSub">Track purchases, status and dispatch for every order.</p>
+      <button type="button" id="heroBack" class="btn btn-primary btn-small" hidden>Back to all orders</button>
+    </div>
+    <a id="heroCredit" class="hero-credit" target="_blank" rel="noopener"></a>
+  </section>
 
   <div id="syncMsg" class="banner" hidden></div>
 
@@ -315,5 +326,6 @@
   </div>
 
   <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script src="{{ url_for('static', filename='hero.js') }}"></script>
 </body>
 </html>
