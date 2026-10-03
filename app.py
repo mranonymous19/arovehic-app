@@ -153,6 +153,7 @@ def init_db():
         );
 
         CREATE INDEX IF NOT EXISTS idx_items_order_id ON items (shopify_order_id);
+        CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders (created_at DESC);
         """
     )
     # Migration: add address/phone columns if this table was created before they existed.
@@ -175,6 +176,7 @@ def init_db():
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS amount_to_receive NUMERIC;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_type TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_at TEXT;
+        CREATE INDEX IF NOT EXISTS idx_orders_deleted_at ON orders (deleted_at);
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS packed BOOLEAN NOT NULL DEFAULT false;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS packed_by TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS packed_at TEXT;
@@ -225,12 +227,18 @@ def init_db():
 # ---------------------------------------------------------------------------
 
 def get_setting(key, default=None):
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("SELECT value FROM settings WHERE key = %s", (key,))
-    row = cur.fetchone()
-    cur.close()
-    return row["value"] if row else default
+    # Load all settings in ONE query and cache them for the rest of this
+    # request, instead of one database round-trip per setting.
+    cache = g.get("_settings_cache")
+    if cache is None:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("SELECT key, value FROM settings")
+        cache = {r["key"]: r["value"] for r in cur.fetchall()}
+        cur.close()
+        g._settings_cache = cache
+    val = cache.get(key)
+    return val if val is not None else default
 
 
 def set_setting(key, value):
@@ -243,6 +251,7 @@ def set_setting(key, value):
     )
     db.commit()
     cur.close()
+    g.pop("_settings_cache", None)
 
 
 def log_activity(cur, item_id, item_name, action, details="", order_id=None):
@@ -1161,11 +1170,16 @@ def api_orders():
         # deduction from balance_due exactly, so the two never disagree.
         billing_items_for_amount = [i for i in all_order_items if i["status"] in ("purchased", "stock")]
         amount_to_receive = None
-        if payment_type == "cod" and billing_items_for_amount:
+        order_total = None
+        if billing_items_for_amount:
+            # Invoice grand total (purchased/in-stock items + shipping) —
+            # shown for every order in Billing, COD and Prepaid alike.
             total_incl = sum(
                 float(i["price"] or 0) * (i["quantity"] or 0) for i in billing_items_for_amount
             )
             grand_total = round(total_incl + float(shipping_amount or 0), 2)
+            order_total = grand_total
+        if payment_type == "cod" and billing_items_for_amount:
             balance_due = order["balance_due"]
             if balance_due is not None:
                 na_items = [i for i in all_order_items if i["status"] == "na"]
@@ -1200,6 +1214,7 @@ def api_orders():
                 "closed": closed,
                 "payment_type": payment_type,
                 "amount_to_receive": amount_to_receive,
+                "order_total": order_total,
                 "billed_at": billed_at,
                 "packed": order["packed"],
                 "packed_by": order["packed_by"],
@@ -2123,8 +2138,12 @@ def api_update_order_cancelled(order_id):
 
 
 @app.route("/api/activity-log", methods=["GET"])
-@owner_required
+@login_required
 def api_activity_log():
+    # Read-only: owner and telecaller can view the log (telecaller needs the
+    # full order history while on a call); nobody else.
+    if session.get("role") not in ("owner", "telecaller"):
+        return jsonify({"error": "Only the owner and telecallers can view the activity log"}), 403
     search = request.args.get("search", "").strip()
     order_id = request.args.get("order_id", "").strip()
 

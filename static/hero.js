@@ -86,7 +86,7 @@
 
   // Mobile: move search + filters into the menu
   var actions = document.querySelector('.topbar-actions'), orders = document.getElementById('ordersContainer');
-  var bars = Array.prototype.slice.call(document.querySelectorAll('.filters'));
+  var bars = Array.prototype.slice.call(document.querySelectorAll('.filters')).filter(function (b) { return !b.closest('.modal'); });
   if (actions && orders && bars.length) {
     var box = document.createElement('div');
     box.id = 'menuFilters';

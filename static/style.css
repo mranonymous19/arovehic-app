@@ -370,7 +370,8 @@ a.btn { text-decoration: none; display: inline-block; }
   background: var(--blue-bg);
   border: 1px solid var(--blue);
 }
-.billed-date-badge {
+.billed-date-badge,
+.arrived-date-badge {
   color: var(--muted);
   background: transparent;
   border: 1px solid var(--line);
@@ -933,4 +934,13 @@ main {
   font-size: 13px;
   padding: 0;
   text-decoration: underline;
+}
+
+.billing-result-count:empty { display: none; }
+
+.order-total-badge {
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--ink);
+  font-weight: 600;
 }

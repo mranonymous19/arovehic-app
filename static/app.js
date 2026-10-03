@@ -132,7 +132,7 @@ async function loadMe() {
   pasteOrderBtn.hidden = !(isOwner || currentRole === "telecaller");
   settingsBtn.hidden = !isOwner;
   usersBtn.hidden = !isOwner;
-  activityLogBtn.hidden = !isOwner;
+  activityLogBtn.hidden = !(isOwner || currentRole === "telecaller");
   trashBtn.hidden = !(isOwner || currentRole === "telecaller");
   cancelledBtn.hidden = !(isOwner || currentRole === "telecaller");
   // Accounts/Packer are locked to a single Billing-only view already — an
@@ -596,6 +596,9 @@ function renderOrders(orders) {
           ? `<span class="invoice-badge invoice-badge-printed">Invoice Printed · ${escapeHtml(order.invoice_number)}${order.invoice_printed_by ? ` · by ${escapeHtml(order.invoice_printed_by)}` : ""}</span>`
           : `<span class="invoice-badge invoice-badge-not-printed">Not Printed</span>`)
       : "";
+    const totalBadge = (showInvoiceInfo && order.order_total != null)
+      ? `<span class="invoice-badge order-total-badge">Total · ₹${Number(order.order_total).toFixed(2)}</span>`
+      : "";
     const amountBadge = (showInvoiceInfo && order.payment_type === "cod" && order.amount_to_receive != null)
       ? `<span class="invoice-badge amount-to-receive-badge">To Receive · ₹${Number(order.amount_to_receive).toFixed(2)}</span>`
       : "";
@@ -607,6 +610,19 @@ function renderOrders(orders) {
           ? `<span class="invoice-badge billed-date-badge">Exported · ${new Date(order.tally_exported_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</span>`
           : `<span class="invoice-badge invoice-badge-not-printed">Not exported</span>`)
       : "";
+    // Date/time the order arrived on Shopify (created_at), shown in IST
+    // on every view except Billing (already crowded with badges). Skipped silently if the value is blank/unparseable.
+    let arrivedBadge = "";
+    if (order.created_at && currentFilter !== "billing") {
+      const d = new Date(order.created_at);
+      if (!isNaN(d)) {
+        const txt = d.toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata", day: "numeric", month: "short", year: "numeric",
+          hour: "numeric", minute: "2-digit", hour12: true,
+        });
+        arrivedBadge = `<span class="invoice-badge arrived-date-badge" title="Order arrived on Shopify">Arrived · ${escapeHtml(txt)}</span>`;
+      }
+    }
     const billBadge = (showInvoiceInfo && order.bill_cancelled)
       ? `<span class="invoice-badge cancelled-badge" title="${escapeHtml(order.bill_cancelled_reason || "")}">Bill Cancelled${order.bill_cancelled_reason ? ": " + escapeHtml(order.bill_cancelled_reason) : ""}</span>`
       : "";
@@ -635,7 +651,9 @@ function renderOrders(orders) {
         <span class="customer">${escapeHtml(order.customer_name || "")}</span>
         ${order.closed ? `<span class="order-closed-badge">Closed</span>` : ""}
         ${paymentBadge}
+        ${arrivedBadge}
         ${invoiceBadge}
+        ${totalBadge}
         ${amountBadge}
         ${billedDateBadge}
         ${tallyBadge}
@@ -649,7 +667,7 @@ function renderOrders(orders) {
         ${canManageCancel ? `<label class="order-cancelled-checkbox"><input type="checkbox" class="order-cancelled-input" ${order.cancelled ? "checked" : ""} /> Cancelled</label>` : ""}
         ${canCancelBill ? `<button type="button" class="btn btn-ghost btn-small btn-danger order-bill-cancel-link">${order.bill_cancelled ? "Restore Bill" : "Cancel Bill"}</button>` : ""}
         ${canPrintInvoice && !order.bill_cancelled ? `<button type="button" class="btn btn-ghost btn-small order-invoice-link" data-order-id="${escapeHtml(order.order_id)}">${order.invoice_number ? "Reprint Invoice" : "Print Invoice"}</button>` : ""}
-        ${currentRole === "owner" ? `<button type="button" class="order-history-link" data-order-id="${escapeHtml(order.order_id)}">History</button>` : ""}
+        ${(currentRole === "owner" || currentRole === "telecaller") ? `<button type="button" class="order-history-link" data-order-id="${escapeHtml(order.order_id)}">History</button>` : ""}
         ${currentRole === "owner" && currentFilter === "trash" ? `<button type="button" class="btn btn-primary btn-small order-restore-link" data-order-id="${escapeHtml(order.order_id)}">Restore</button>` : ""}
         ${currentRole === "owner" && currentFilter !== "trash" ? `<button type="button" class="btn btn-ghost btn-small btn-danger order-delete-link" data-order-id="${escapeHtml(order.order_id)}">Delete</button>` : ""}
       </span>
@@ -695,8 +713,10 @@ function renderOrders(orders) {
         printInvoice(order.order_id, e.currentTarget);
       });
     }
-    if (currentRole === "owner") {
+    if (currentRole === "owner" || currentRole === "telecaller") {
       head.querySelector(".order-history-link").addEventListener("click", () => openActivityLogForOrder(order.order_id));
+    }
+    if (currentRole === "owner") {
       if (currentFilter === "trash") {
         head.querySelector(".order-restore-link").addEventListener("click", () => restoreOrder(order.order_id, order.order_name));
       } else {
@@ -1515,6 +1535,17 @@ async function loadActivityLog() {
 // ---------------------------------------------------------------------------
 
 (async function init() {
+  // Show a loading state immediately and fetch user + orders in parallel
+  // (they don't depend on each other on the network side), instead of
+  // waiting for /api/me to finish before even asking for orders.
+  ordersContainer.innerHTML = '<div class="empty-state"><div class="glyph">Loading orders…</div></div>';
+  const ordersFetch = fetch("/api/orders").then((r) => r.json()).catch(() => null);
   await loadMe();
-  loadOrders();
+  const orders = await ordersFetch;
+  if (Array.isArray(orders) && !currentFilter && !currentPaymentFilter && !currentDateFrom && !currentDateTo) {
+    lastLoadedOrders = orders;
+    renderOrders(filterByTrackQuery(orders));
+  } else {
+    loadOrders();
+  }
 })();
