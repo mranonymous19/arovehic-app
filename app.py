@@ -195,6 +195,8 @@ def init_db():
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_cancelled_reason TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_cancelled_by TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_cancelled_at TEXT;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_edited BOOLEAN NOT NULL DEFAULT false;
+        ALTER TABLE items ADD COLUMN IF NOT EXISTS item_edited BOOLEAN NOT NULL DEFAULT false;
         """
     )
     # Migration: tables created before the 'packer'/'accounts' roles existed
@@ -786,16 +788,17 @@ def api_sync():
             "balance_due, created_at, synced_at) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (shopify_order_id) DO UPDATE SET "
-            "order_name = EXCLUDED.order_name, customer_name = EXCLUDED.customer_name, "
-            "shipping_address = EXCLUDED.shipping_address, "
-            "shipping_address1 = EXCLUDED.shipping_address1, "
-            "shipping_address2 = EXCLUDED.shipping_address2, "
-            "shipping_city = EXCLUDED.shipping_city, "
-            "shipping_state = EXCLUDED.shipping_state, "
-            "shipping_pincode = EXCLUDED.shipping_pincode, "
-            "customer_phone = EXCLUDED.customer_phone, "
-            "shipping_amount = EXCLUDED.shipping_amount, "
-            "balance_due = EXCLUDED.balance_due, "
+            "order_name = EXCLUDED.order_name, "
+            "customer_name = CASE WHEN orders.order_edited THEN orders.customer_name ELSE EXCLUDED.customer_name END, "
+            "shipping_address = CASE WHEN orders.order_edited THEN orders.shipping_address ELSE EXCLUDED.shipping_address END, "
+            "shipping_address1 = CASE WHEN orders.order_edited THEN orders.shipping_address1 ELSE EXCLUDED.shipping_address1 END, "
+            "shipping_address2 = CASE WHEN orders.order_edited THEN orders.shipping_address2 ELSE EXCLUDED.shipping_address2 END, "
+            "shipping_city = CASE WHEN orders.order_edited THEN orders.shipping_city ELSE EXCLUDED.shipping_city END, "
+            "shipping_state = CASE WHEN orders.order_edited THEN orders.shipping_state ELSE EXCLUDED.shipping_state END, "
+            "shipping_pincode = CASE WHEN orders.order_edited THEN orders.shipping_pincode ELSE EXCLUDED.shipping_pincode END, "
+            "customer_phone = CASE WHEN orders.order_edited THEN orders.customer_phone ELSE EXCLUDED.customer_phone END, "
+            "shipping_amount = CASE WHEN orders.order_edited THEN orders.shipping_amount ELSE EXCLUDED.shipping_amount END, "
+            "balance_due = CASE WHEN orders.order_edited THEN orders.balance_due ELSE EXCLUDED.balance_due END, "
             "created_at = EXCLUDED.created_at, synced_at = EXCLUDED.synced_at",
             (order_id, order_name, customer_name, full_address, address1, address2,
              city, state, pincode, customer_phone, shipping_amount, balance_due, created_at, now),
@@ -816,12 +819,15 @@ def api_sync():
             if existing:
                 # Keep whatever status was already set; just refresh details.
                 cur.execute(
-                    "UPDATE items SET shopify_order_id=%s, title=%s, variant_title=%s, "
-                    "quantity=%s, vendor=%s, updated_at=%s, "
-                    "price = CASE WHEN price_edited THEN price ELSE %s END, "
-                    "original_price = CASE WHEN price_edited THEN %s ELSE original_price END "
+                    "UPDATE items SET shopify_order_id=%s, updated_at=%s, "
+                    "title = CASE WHEN item_edited THEN title ELSE %s END, "
+                    "variant_title = CASE WHEN item_edited THEN variant_title ELSE %s END, "
+                    "quantity = CASE WHEN item_edited THEN quantity ELSE %s END, "
+                    "vendor = CASE WHEN item_edited THEN vendor ELSE %s END, "
+                    "price = CASE WHEN price_edited OR item_edited THEN price ELSE %s END, "
+                    "original_price = CASE WHEN price_edited OR item_edited THEN %s ELSE original_price END "
                     "WHERE id=%s",
-                    (order_id, title, variant_title, quantity, vendor, now, price, price, item_id),
+                    (order_id, now, title, variant_title, quantity, vendor, price, price, item_id),
                 )
             else:
                 cur.execute(
@@ -1211,6 +1217,7 @@ def api_orders():
                 "shipping_state": order["shipping_state"],
                 "shipping_pincode": order["shipping_pincode"],
                 "created_at": order["created_at"],
+                "shipping_amount": shipping_amount,
                 "closed": closed,
                 "payment_type": payment_type,
                 "amount_to_receive": amount_to_receive,
@@ -1988,6 +1995,274 @@ def api_update_item_price(item_id):
         "ok": True, "id": item_id, "price": f"{new_price:.2f}", "original_price": original,
         "price_edited": is_edited,
         "already_exported": bool(o.get("tally_exported_at")) if o else False,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Edit order (accounts/owner) — change customer/address, delivery charge, and
+# every item (name, qty, price), or add more items, in one go.
+# ---------------------------------------------------------------------------
+
+def _item_is_removable(order_id, item_id):
+    """Items added by hand (manual orders, or items added via Edit Order) can
+    be deleted. Shopify-synced items can't — a sync would just bring them
+    back — so those are dropped by marking them N/A instead."""
+    return str(item_id).startswith(f"{order_id}-item-")
+
+
+def _money(v):
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _effective_balance(stored_balance, items, shipping_amount=None):
+    """Returns (stored - N/A value + price-edit delta), i.e. the COD amount
+    the invoice would show (before the max(0) clamp), plus the pieces the
+    edit needs to keep it consistent."""
+    na_value = sum(_money(i["price"]) * (i["quantity"] or 0) for i in items if i["status"] == "na")
+    billing = [dict(i) for i in items if i["status"] in ("purchased", "stock")]
+    billing_total = sum(_money(i["price"]) * (i["quantity"] or 0) for i in billing)
+    pd = price_edit_delta(billing)
+    eff = None if stored_balance is None else float(stored_balance) - na_value + pd
+    return eff, na_value, pd, billing_total
+
+
+@app.route("/api/orders/<order_id>/edit-data", methods=["GET"])
+@accounts_or_owner_required
+def api_order_edit_data(order_id):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT * FROM orders WHERE shopify_order_id = %s", (order_id,))
+    o = cur.fetchone()
+    if o is None:
+        cur.close()
+        return jsonify({"error": "order not found"}), 404
+    cur.execute("SELECT * FROM items WHERE shopify_order_id = %s ORDER BY sort_order", (order_id,))
+    items = cur.fetchall()
+    cur.close()
+    return jsonify({
+        "order_id": o["shopify_order_id"],
+        "order_name": o["order_name"],
+        "customer_name": o["customer_name"] or "",
+        "phone": o["customer_phone"] or "",
+        "address1": o["shipping_address1"] or "",
+        "address2": o["shipping_address2"] or "",
+        "city": o["shipping_city"] or "",
+        "state": o["shipping_state"] or "",
+        "pincode": o["shipping_pincode"] or "",
+        "shipping_amount": float(o["shipping_amount"]) if o["shipping_amount"] is not None else 0,
+        "invoice_number": o["invoice_number"],
+        "tally_exported_at": o["tally_exported_at"],
+        "items": [
+            {
+                "id": i["id"], "title": i["title"] or "", "variant_title": i["variant_title"] or "",
+                "vendor": i["vendor"] or "", "quantity": i["quantity"] or 1,
+                "price": i["price"] or "0", "status": i["status"],
+                "removable": _item_is_removable(order_id, i["id"]),
+            }
+            for i in items
+        ],
+    })
+
+
+@app.route("/api/orders/<order_id>/edit", methods=["POST"])
+@accounts_or_owner_required
+def api_edit_order(order_id):
+    data = request.get_json(force=True) or {}
+    errors = []
+
+    customer_name = (data.get("customer_name") or "").strip()
+    phone = re.sub(r"\D", "", data.get("phone") or "")
+    address1 = (data.get("address1") or "").strip()
+    address2 = (data.get("address2") or "").strip()
+    city = (data.get("city") or "").strip()
+    state = (data.get("state") or "").strip()
+    pincode = (data.get("pincode") or "").strip()
+    if not customer_name:
+        errors.append("Customer name is required")
+
+    try:
+        new_shipping = round(float(data.get("shipping_amount") or 0), 2)
+    except (TypeError, ValueError):
+        errors.append("Delivery charge must be a number")
+        new_shipping = 0.0
+    if new_shipping < 0:
+        errors.append("Delivery charge can't be negative")
+
+    items_in = data.get("items") or []
+    remove_ids = set(data.get("remove_ids") or [])
+    parsed = []
+    for idx, raw in enumerate(items_in, start=1):
+        title = (raw.get("title") or "").strip()
+        if not title:
+            if raw.get("id"):
+                errors.append(f"Item {idx}: name can't be empty")
+            continue  # blank new row — skip
+        try:
+            quantity = int(raw.get("quantity") or 1)
+        except (TypeError, ValueError):
+            errors.append(f"Item {idx}: quantity must be a whole number")
+            quantity = 1
+        if quantity < 1:
+            errors.append(f"Item {idx}: quantity must be at least 1")
+            quantity = 1
+        try:
+            price = round(float(raw.get("price") or 0), 2)
+        except (TypeError, ValueError):
+            errors.append(f"Item {idx}: price must be a number")
+            price = 0.0
+        if price < 0:
+            errors.append(f"Item {idx}: price can't be negative")
+        status = raw.get("status") or "stock"
+        if status not in VALID_STATUSES or status == "refunded":
+            status = "stock"
+        parsed.append({
+            "id": raw.get("id") or None, "title": title,
+            "vendor": (raw.get("vendor") or "").strip(),
+            "quantity": quantity, "price": price, "status": status,
+        })
+    if errors:
+        return jsonify({"error": "; ".join(errors)}), 400
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT * FROM orders WHERE shopify_order_id = %s", (order_id,))
+    order = cur.fetchone()
+    if order is None:
+        cur.close()
+        return jsonify({"error": "order not found"}), 404
+    cur.execute("SELECT * FROM items WHERE shopify_order_id = %s", (order_id,))
+    old_items = {i["id"]: dict(i) for i in cur.fetchall()}
+
+    for it in parsed:
+        if it["id"] and it["id"] not in old_items:
+            cur.close()
+            return jsonify({"error": "An item in this edit doesn't belong to this order — reload and try again"}), 400
+    for rid in remove_ids:
+        if rid not in old_items or not _item_is_removable(order_id, rid):
+            cur.close()
+            return jsonify({"error": "Only items added by hand can be removed — mark Shopify items as N/A instead"}), 400
+    remaining = [i for i in old_items if i not in remove_ids] + [p for p in parsed if not p["id"]]
+    if not remaining:
+        cur.close()
+        return jsonify({"error": "An order needs at least one item"}), 400
+
+    # ---- "before" figures, so the COD amount can be kept consistent ----
+    old_shipping = _money(order["shipping_amount"])
+    eff_old, _na_old, _pd_old, billing_old = _effective_balance(order["balance_due"], list(old_items.values()))
+
+    now = datetime.now(timezone.utc).isoformat()
+    who = session["name"]
+    changes = []
+
+    # ---- apply item changes ----
+    new_state = {k: dict(v) for k, v in old_items.items()}
+    for rid in remove_ids:
+        it = old_items[rid]
+        cur.execute("DELETE FROM items WHERE id = %s", (rid,))
+        new_state.pop(rid, None)
+        changes.append(f"removed '{it['title']}'")
+        log_activity(cur, rid, it["title"], "order_edit", f"{who} removed this item", order_id=order_id)
+
+    for p in parsed:
+        if p["id"]:
+            old = old_items[p["id"]]
+            if p["id"] in remove_ids:
+                continue
+            diffs = []
+            if (old["title"] or "") != p["title"]:
+                diffs.append(f"name '{old['title']}' -> '{p['title']}'")
+            if (old["vendor"] or "") != p["vendor"]:
+                diffs.append(f"vendor '{old['vendor'] or ''}' -> '{p['vendor']}'")
+            if (old["quantity"] or 0) != p["quantity"]:
+                diffs.append(f"qty {old['quantity']} -> {p['quantity']}")
+            price_changed = abs(_money(old["price"]) - p["price"]) > 0.001
+            if price_changed:
+                diffs.append(f"price {old['price']} -> {p['price']:.2f}")
+            if not diffs:
+                continue
+            original = old["original_price"] if old["original_price"] not in (None, "") else old["price"]
+            is_price_edited = abs(p["price"] - _money(original)) > 0.001
+            cur.execute(
+                "UPDATE items SET title=%s, vendor=%s, quantity=%s, price=%s, original_price=%s, "
+                "price_edited=%s, price_edited_by=%s, item_edited=true, updated_at=%s WHERE id=%s",
+                (p["title"], p["vendor"], p["quantity"], f"{p['price']:.2f}", original,
+                 is_price_edited, who if is_price_edited else None, now, p["id"]),
+            )
+            new_state[p["id"]].update(
+                title=p["title"], vendor=p["vendor"], quantity=p["quantity"],
+                price=f"{p['price']:.2f}", original_price=original, price_edited=is_price_edited,
+            )
+            changes.append(f"'{p['title']}': " + ", ".join(diffs))
+            log_activity(cur, p["id"], p["title"], "order_edit", f"{who} edited: " + ", ".join(diffs), order_id=order_id)
+        else:
+            new_id = f"{order_id}-item-{uuid.uuid4().hex[:8]}"
+            cur.execute(
+                "INSERT INTO items (id, shopify_order_id, title, variant_title, quantity, price, vendor, "
+                "status, item_edited, updated_at) VALUES (%s, %s, %s, '', %s, %s, %s, %s, true, %s)",
+                (new_id, order_id, p["title"], p["quantity"], f"{p['price']:.2f}", p["vendor"], p["status"], now),
+            )
+            new_state[new_id] = {
+                "id": new_id, "title": p["title"], "quantity": p["quantity"], "price": f"{p['price']:.2f}",
+                "status": p["status"], "price_edited": False, "original_price": None,
+            }
+            changes.append(f"added '{p['title']}' x{p['quantity']} @ {p['price']:.2f}")
+            log_activity(cur, new_id, p["title"], "order_edit",
+                         f"{who} added this item: qty {p['quantity']} @ {p['price']:.2f} ({p['status']})",
+                         order_id=order_id)
+
+    # ---- order-level fields ----
+    full_address = ", ".join(x for x in [address1, address2, city, state, pincode] if x)
+    old_full = order["shipping_address"] or ""
+    if (order["customer_name"] or "") != customer_name:
+        changes.append(f"customer '{order['customer_name'] or ''}' -> '{customer_name}'")
+    if (order["customer_phone"] or "") != phone:
+        changes.append("phone changed")
+    if old_full != full_address:
+        changes.append("address changed")
+
+    shipping_changed = abs(new_shipping - old_shipping) > 0.001 or order["shipping_amount"] is None
+    set_payment_type = order["payment_type"]
+    if shipping_changed and set_payment_type not in ("cod", "prepaid"):
+        # COD vs Prepaid is derived from the delivery charge for Shopify orders;
+        # lock in what it is today so editing the charge can't flip it.
+        cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
+        set_payment_type = resolve_payment_type(order, cod_threshold)
+    if abs(new_shipping - old_shipping) > 0.001:
+        changes.append(f"delivery charge {old_shipping:.2f} -> {new_shipping:.2f}")
+
+    # ---- keep COD "balance_due" consistent with the new item list ----
+    new_balance = order["balance_due"]
+    if order["balance_due"] is not None:
+        _eff, na_new, pd_new, billing_new = _effective_balance(None, list(new_state.values()))
+        target_eff = eff_old + (billing_new - billing_old) + (new_shipping - old_shipping)
+        new_balance = round(target_eff + na_new - pd_new, 2)
+
+    cur.execute(
+        "UPDATE orders SET customer_name=%s, customer_phone=%s, shipping_address=%s, shipping_address1=%s, "
+        "shipping_address2=%s, shipping_city=%s, shipping_state=%s, shipping_pincode=%s, "
+        "shipping_amount=%s, balance_due=%s, payment_type=%s, order_edited=true WHERE shopify_order_id=%s",
+        (customer_name, phone, full_address, address1, address2, city, state, pincode,
+         new_shipping, new_balance, set_payment_type, order_id),
+    )
+    # The Tally XML is built live from the order/items, so it always carries the
+    # edited figures — no invoice reprint needed. If this order was already
+    # exported, clear that mark so it shows up again in the next "Only new" XML.
+    was_exported = bool(order["tally_exported_at"])
+    if changes and was_exported:
+        cur.execute("UPDATE orders SET tally_exported_at = NULL WHERE shopify_order_id = %s", (order_id,))
+        changes.append("marked for Tally re-export")
+    if changes:
+        log_activity(cur, None, order["order_name"] or order_id, "order_edit",
+                     f"{who} edited order: " + "; ".join(changes), order_id=order_id)
+    db.commit()
+    cur.close()
+    return jsonify({
+        "ok": True, "changes": len(changes),
+        "has_invoice": bool(order["invoice_number"]),
+        "re_export": bool(changes and was_exported),
     })
 
 

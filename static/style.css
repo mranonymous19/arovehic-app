@@ -944,3 +944,34 @@ main {
   border: 1px solid var(--ink);
   font-weight: 600;
 }
+
+/* Edit order modal */
+.eo-hint { font-weight: 400; font-size: 11px; color: var(--muted); }
+.eo-item-row {
+  display: grid;
+  grid-template-columns: 1fr 1.6fr 0.55fr 0.8fr 0.9fr 36px;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.eo-item-row input, .eo-item-row select {
+  width: 100%;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font-family: 'Inter', sans-serif;
+  font-size: 13px;
+  background: var(--card);
+  color: var(--ink);
+  margin: 0;
+}
+.eo-item-row .eo-status-label { font-size: 12px; color: var(--muted); }
+.eo-item-row.eo-new { background: rgba(247, 127, 0, 0.06); border-radius: 4px; padding: 4px; }
+.eo-item-row.eo-removed { opacity: .4; }
+.eo-item-row.eo-removed input { text-decoration: line-through; pointer-events: none; }
+.eo-cols { display: grid; grid-template-columns: 1fr 1.6fr 0.55fr 0.8fr 0.9fr 36px; gap: 8px; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+@media (max-width: 640px) {
+  .eo-cols { display: none; }
+  .eo-item-row { grid-template-columns: 1fr 1fr; border-bottom: 1px dashed var(--line); padding-bottom: 8px; }
+  .eo-item-row .eo-title { grid-column: span 2; }
+}

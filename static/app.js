@@ -497,11 +497,11 @@ async function restoreOrder(orderId, orderName) {
   showMessage(`Restored ${orderName || orderId}.`);
 }
 
-async function printInvoice(orderId, buttonEl) {
+async function printInvoice(orderId, buttonEl, preOpenedTab) {
   // Open the tab synchronously, inside the click handler, so browsers don't
   // treat it as an unrequested popup — we fill in its location once the
   // fetch below resolves.
-  const tab = window.open("", "_blank");
+  const tab = preOpenedTab || window.open("", "_blank");
   const originalLabel = buttonEl.textContent;
   buttonEl.disabled = true;
   buttonEl.textContent = "Printing…";
@@ -735,8 +735,12 @@ function renderOrders(orders) {
 
 // Only accounts/owner, and only inside Billing — that's where invoices are
 // made and the figures that go to Tally are locked in.
-function canEditPrice() {
-  return currentFilter === "billing" && (currentRole === "owner" || currentRole === "accounts");
+function canEditPrice(item) {
+  // Any item that has proceeded to billing (Purchased / In Stock), wherever it
+  // is shown — Closed, All, Billing, etc. — not just inside the Billing filter.
+  return (currentRole === "owner" || currentRole === "accounts")
+    && currentFilter !== "trash"
+    && !!item && (item.status === "purchased" || item.status === "stock");
 }
 
 async function updateItemPrice(itemId, value) {
@@ -760,6 +764,192 @@ async function updateItemPrice(itemId, value) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Edit order (accounts/owner, Billing): customer/address, delivery charge,
+// every item's name/qty/price, and adding more items — all in one popup.
+// ---------------------------------------------------------------------------
+const editOrderModal = document.getElementById("editOrderModal");
+const eoTitle = document.getElementById("eoTitle");
+const eoCustomerName = document.getElementById("eoCustomerName");
+const eoPhone = document.getElementById("eoPhone");
+const eoAddress1 = document.getElementById("eoAddress1");
+const eoAddress2 = document.getElementById("eoAddress2");
+const eoCity = document.getElementById("eoCity");
+const eoState = document.getElementById("eoState");
+const eoPincode = document.getElementById("eoPincode");
+const eoShipping = document.getElementById("eoShipping");
+const eoItemsList = document.getElementById("eoItemsList");
+const eoAddItemBtn = document.getElementById("eoAddItemBtn");
+const eoTotalDisplay = document.getElementById("eoTotalDisplay");
+const eoWarn = document.getElementById("eoWarn");
+const eoError = document.getElementById("eoError");
+const eoSaveBtn = document.getElementById("eoSaveBtn");
+const eoSaveReprintBtn = document.getElementById("eoSaveReprintBtn");
+const eoCancelBtn = document.getElementById("eoCancelBtn");
+let eoOrderId = null;
+
+function eoUpdateTotal() {
+  let total = 0;
+  eoItemsList.querySelectorAll(".eo-item-row").forEach((row) => {
+    if (row.classList.contains("eo-removed")) return;
+    const st = row.dataset.status;
+    if (st === "na" || st === "pending" || st === "wait") return; // not on the invoice
+    total += (parseFloat(row.querySelector(".eo-qty").value) || 0) * (parseFloat(row.querySelector(".eo-price").value) || 0);
+  });
+  total += parseFloat(eoShipping.value) || 0;
+  eoTotalDisplay.textContent = `₹${total.toFixed(2)}`;
+}
+eoShipping.addEventListener("input", eoUpdateTotal);
+
+function eoAddRow(item) {
+  const isNew = !item;
+  const row = document.createElement("div");
+  row.className = "eo-item-row" + (isNew ? " eo-new" : "");
+  row.dataset.itemId = item ? item.id : "";
+  row.dataset.removable = item && item.removable ? "1" : "";
+  row.dataset.status = item ? item.status : "stock";
+  const nameVal = item ? item.title + (item.variant_title ? ` — ${item.variant_title}` : "") : "";
+  row.innerHTML = `
+    <input type="text" class="eo-vendor" placeholder="Vendor / Model" value="${escapeHtml(item?.vendor || "")}">
+    <input type="text" class="eo-title" placeholder="Item name" value="${escapeHtml(item ? item.title : "")}" ${item && item.variant_title ? `title="${escapeHtml(nameVal)}"` : ""}>
+    <input type="number" class="eo-qty" min="1" step="1" value="${item ? item.quantity : 1}" placeholder="Qty">
+    <input type="number" class="eo-price" min="0" step="0.01" value="${item ? Number(item.price) : ""}" placeholder="Price ₹">
+    ${isNew
+      ? `<select class="eo-status"><option value="stock">In Stock</option><option value="purchased">Purchased</option></select>`
+      : `<span class="eo-status-label">${escapeHtml(STATUS_LABELS[item.status] || item.status)}</span>`}
+    <button type="button" class="mo-item-remove" ${isNew || item.removable ? "" : "disabled"} title="${isNew || item.removable ? "Remove item" : "Shopify items can't be removed — mark them N/A instead"}">✕</button>
+  `;
+  eoItemsList.appendChild(row);
+  row.querySelectorAll(".eo-qty, .eo-price").forEach((el) => el.addEventListener("input", eoUpdateTotal));
+  const statusSel = row.querySelector(".eo-status");
+  if (statusSel) statusSel.addEventListener("change", () => { row.dataset.status = statusSel.value; eoUpdateTotal(); });
+  row.querySelector(".mo-item-remove").addEventListener("click", () => {
+    if (isNew) {
+      row.remove();
+    } else {
+      row.classList.toggle("eo-removed");
+    }
+    eoUpdateTotal();
+  });
+  eoUpdateTotal();
+}
+
+eoAddItemBtn.addEventListener("click", () => eoAddRow(null));
+eoCancelBtn.addEventListener("click", () => { editOrderModal.hidden = true; });
+
+async function openEditOrder(orderId) {
+  eoOrderId = orderId;
+  eoError.hidden = true;
+  eoWarn.hidden = true;
+  let data;
+  try {
+    const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/edit-data`);
+    data = await res.json();
+    if (!res.ok) { showMessage(data.error || "Could not open order.", true); return; }
+  } catch (err) {
+    showMessage("Could not open order: " + err.message, true);
+    return;
+  }
+  eoTitle.textContent = `Edit Order ${data.order_name || ""}`.trim();
+  eoCustomerName.value = data.customer_name;
+  eoPhone.value = data.phone;
+  eoAddress1.value = data.address1;
+  eoAddress2.value = data.address2;
+  eoCity.value = data.city;
+  eoPincode.value = data.pincode;
+  eoShipping.value = data.shipping_amount;
+  const states = INDIA_STATES.includes(data.state) || !data.state ? INDIA_STATES : [data.state, ...INDIA_STATES];
+  eoState.innerHTML = `<option value="">Select…</option>` +
+    states.map((st) => `<option value="${escapeHtml(st)}">${escapeHtml(st)}</option>`).join("");
+  eoState.value = data.state;
+  eoItemsList.innerHTML = `<div class="eo-cols"><span>Vendor</span><span>Item</span><span>Qty</span><span>Price ₹</span><span>Status</span><span></span></div>`;
+  data.items.forEach((it) => eoAddRow(it));
+  if (data.tally_exported_at) {
+    eoWarn.textContent = "This order was already exported to Tally. After saving it goes back into \"Only new\" so the next Tally XML includes the updated figures — delete the old voucher in Tally before importing it again.";
+    eoWarn.hidden = false;
+  }
+  eoSaveReprintBtn.hidden = !data.invoice_number;
+  eoUpdateTotal();
+  editOrderModal.hidden = false;
+}
+
+async function eoSave(reprintTab) {
+  eoError.hidden = true;
+  const items = [];
+  const remove_ids = [];
+  eoItemsList.querySelectorAll(".eo-item-row").forEach((row) => {
+    const id = row.dataset.itemId;
+    if (row.classList.contains("eo-removed")) { if (id) remove_ids.push(id); return; }
+    items.push({
+      id: id || null,
+      vendor: row.querySelector(".eo-vendor").value.trim(),
+      title: row.querySelector(".eo-title").value.trim(),
+      quantity: row.querySelector(".eo-qty").value || 1,
+      price: row.querySelector(".eo-price").value || 0,
+      status: id ? undefined : row.querySelector(".eo-status").value,
+    });
+  });
+  const payload = {
+    customer_name: eoCustomerName.value.trim(),
+    phone: eoPhone.value.trim(),
+    address1: eoAddress1.value.trim(),
+    address2: eoAddress2.value.trim(),
+    city: eoCity.value.trim(),
+    state: eoState.value,
+    pincode: eoPincode.value.trim(),
+    shipping_amount: eoShipping.value || 0,
+    items,
+    remove_ids,
+  };
+  eoSaveBtn.disabled = true;
+  eoSaveReprintBtn.disabled = true;
+  eoSaveBtn.textContent = "Saving…";
+  try {
+    const res = await fetch(`/api/orders/${encodeURIComponent(eoOrderId)}/edit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      eoError.textContent = data.error || "Could not save changes.";
+      eoError.hidden = false;
+      if (reprintTab) reprintTab.close();
+      return;
+    }
+    editOrderModal.hidden = true;
+    await loadOrders();
+    if (reprintTab !== undefined) {
+      if (data.has_invoice) {
+        await printInvoice(eoOrderId, eoSaveBtn, reprintTab);
+      } else if (reprintTab) {
+        reprintTab.close();
+      }
+    }
+    showMessage(
+      !data.changes ? "No changes to save."
+        : data.re_export ? "Order updated — download the Tally XML (Only new) to get the updated voucher."
+        : "Order updated — the Tally XML will use the new figures.",
+      false
+    );
+  } catch (err) {
+    eoError.textContent = "Could not save changes: " + err.message;
+    eoError.hidden = false;
+    if (reprintTab) reprintTab.close();
+  } finally {
+    eoSaveBtn.disabled = false;
+    eoSaveBtn.textContent = "Save Changes";
+    eoSaveReprintBtn.disabled = false;
+  }
+}
+
+eoSaveBtn.addEventListener("click", () => eoSave());
+eoSaveReprintBtn.addEventListener("click", () => {
+  // Open the tab right here, inside the click, so the browser allows it.
+  const tab = window.open("", "_blank");
+  eoSave(tab);
+});
+
 function renderItemRow(item) {
   const row = document.createElement("div");
   row.className = "item-row";
@@ -767,15 +957,11 @@ function renderItemRow(item) {
   const titleBlock = document.createElement("div");
   titleBlock.innerHTML = `
     <div class="item-title">${escapeHtml(item.title)}${item.variant_title ? ` — ${escapeHtml(item.variant_title)}` : ""}</div>
-    <div class="item-meta">qty ${item.quantity} · ${escapeHtml(item.price || "")}${item.price_edited ? ` <span class="price-edited-badge" title="Shopify price: ${escapeHtml(item.original_price || "")}">edited (was ${escapeHtml(item.original_price || "")})</span>` : ""}${item.vendor ? " · " + escapeHtml(item.vendor) : ""}${canEditPrice() ? ` · <button type="button" class="item-price-edit-btn">Edit price</button>` : ""}</div>
+    <div class="item-meta">qty ${item.quantity} · ${escapeHtml(item.price || "")}${item.price_edited ? ` <span class="price-edited-badge" title="Shopify price: ${escapeHtml(item.original_price || "")}">edited (was ${escapeHtml(item.original_price || "")})</span>` : ""}${item.vendor ? " · " + escapeHtml(item.vendor) : ""}${canEditPrice(item) ? ` · <button type="button" class="item-price-edit-btn">Edit order</button>` : ""}</div>
   `;
   const priceBtn = titleBlock.querySelector(".item-price-edit-btn");
   if (priceBtn) {
-    priceBtn.addEventListener("click", () => {
-      const v = prompt(`New price per unit (₹, GST-inclusive) for "${item.title}"\nShopify price: ${item.original_price || item.price}`, item.price || "");
-      if (v === null || v.trim() === "") return;
-      updateItemPrice(item.id, v.trim());
-    });
+    priceBtn.addEventListener("click", () => openEditOrder(item.order_id || item.shopify_order_id));
   }
 
   const editable = canEditStatus();
@@ -1461,6 +1647,7 @@ const ACTIVITY_ACTION_LABELS = {
   cancelled_update: "Cancelled",
   sync: "Sync",
   manual_add: "Added (paste)",
+  order_edit: "Order edited",
   invoice_print: "Invoice printed",
   invoice_reprint: "Invoice reprinted",
   create_user: "New user",
