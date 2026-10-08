@@ -779,6 +779,14 @@ const eoState = document.getElementById("eoState");
 const eoPincode = document.getElementById("eoPincode");
 const eoShipping = document.getElementById("eoShipping");
 const eoPaymentType = document.getElementById("eoPaymentType");
+const eoCashWrap = document.getElementById("eoCashWrap");
+const eoCash = document.getElementById("eoCash");
+function eoSyncCash() {
+  const isCod = eoPaymentType.value === "cod";
+  eoCashWrap.hidden = !isCod;
+  if (!isCod) eoCash.value = "";
+}
+eoPaymentType.addEventListener("change", eoSyncCash);
 const eoItemsList = document.getElementById("eoItemsList");
 const eoAddItemBtn = document.getElementById("eoAddItemBtn");
 const eoTotalDisplay = document.getElementById("eoTotalDisplay");
@@ -860,6 +868,9 @@ async function openEditOrder(orderId) {
   eoPincode.value = data.pincode;
   eoShipping.value = data.shipping_amount;
   eoPaymentType.value = data.payment_type || "";
+  eoCash.value = data.cash_to_collect != null ? data.cash_to_collect : "";
+  eoSyncCash();
+  if (data.payment_type !== "cod") eoCash.value = "";
   const states = INDIA_STATES.includes(data.state) || !data.state ? INDIA_STATES : [data.state, ...INDIA_STATES];
   eoState.innerHTML = `<option value="">Select…</option>` +
     states.map((st) => `<option value="${escapeHtml(st)}">${escapeHtml(st)}</option>`).join("");
@@ -901,6 +912,7 @@ async function eoSave(reprintTab) {
     pincode: eoPincode.value.trim(),
     shipping_amount: eoShipping.value || 0,
     payment_type: eoPaymentType.value || null,
+    cash_to_collect: eoPaymentType.value === "cod" ? eoCash.value : "",
     items,
     remove_ids,
   };

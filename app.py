@@ -2043,8 +2043,14 @@ def api_order_edit_data(order_id):
     items = cur.fetchall()
     cur.close()
     cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
+    pay_now = resolve_payment_type(o, cod_threshold)
+    cash_now = None
+    if pay_now == "cod" and o["balance_due"] is not None:
+        _e, _n, _p, _b = _effective_balance(o["balance_due"], [dict(i) for i in items])
+        cash_now = round(max(0.0, _e), 2)
     return jsonify({
-        "payment_type": resolve_payment_type(o, cod_threshold),
+        "cash_to_collect": cash_now,
+        "payment_type": pay_now,
         "order_id": o["shopify_order_id"],
         "order_name": o["order_name"],
         "customer_name": o["customer_name"] or "",
@@ -2097,6 +2103,16 @@ def api_edit_order(order_id):
     requested_payment = data.get("payment_type") or None
     if requested_payment not in (None, "cod", "prepaid"):
         errors.append("Payment type must be COD or Prepaid")
+
+    cash_raw = data.get("cash_to_collect")
+    cash_to_collect = None
+    if cash_raw not in (None, ""):
+        try:
+            cash_to_collect = round(float(cash_raw), 2)
+        except (TypeError, ValueError):
+            errors.append("Cash to be collected must be a number")
+        if cash_to_collect is not None and cash_to_collect < 0:
+            errors.append("Cash to be collected can't be negative")
 
     items_in = data.get("items") or []
     remove_ids = set(data.get("remove_ids") or [])
@@ -2252,7 +2268,17 @@ def api_edit_order(order_id):
 
     # ---- keep COD "balance_due" consistent with the new item list ----
     new_balance = order["balance_due"]
-    if payment_switched and requested_payment == "cod":
+    final_payment = set_payment_type if set_payment_type in ("cod", "prepaid") else current_payment
+    _eff_cur = None if eff_old is None else max(0.0, eff_old)
+    cash_changed = (
+        final_payment == "cod" and cash_to_collect is not None
+        and (payment_switched or _eff_cur is None or abs(cash_to_collect - _eff_cur) > 0.001)
+    )
+    if cash_changed:
+        _eff, na_new, pd_new, _bn = _effective_balance(None, list(new_state.values()))
+        new_balance = round(cash_to_collect + na_new - pd_new, 2)
+        changes.append(f"cash to be collected set to {cash_to_collect:.2f}")
+    elif payment_switched and requested_payment == "cod":
         # Shopify's outstanding balance on a prepaid order is 0 (or stale), which
         # would make "Amount to be Received" show 0. Clear it so the COD amount
         # is the full total: billed items + delivery charge.
@@ -2269,7 +2295,7 @@ def api_edit_order(order_id):
         (customer_name, phone, full_address, address1, address2, city, state, pincode,
          new_shipping, new_balance, set_payment_type, order_id),
     )
-    if payment_switched:
+    if payment_switched or cash_changed:
         # amount_to_receive is locked in at invoice print time; it's recomputed on the
         # next (re)print, so drop the stale figure now.
         cur.execute("UPDATE orders SET amount_to_receive = NULL WHERE shopify_order_id = %s", (order_id,))
