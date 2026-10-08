@@ -778,6 +778,7 @@ const eoCity = document.getElementById("eoCity");
 const eoState = document.getElementById("eoState");
 const eoPincode = document.getElementById("eoPincode");
 const eoShipping = document.getElementById("eoShipping");
+const eoPaymentType = document.getElementById("eoPaymentType");
 const eoItemsList = document.getElementById("eoItemsList");
 const eoAddItemBtn = document.getElementById("eoAddItemBtn");
 const eoTotalDisplay = document.getElementById("eoTotalDisplay");
@@ -858,6 +859,7 @@ async function openEditOrder(orderId) {
   eoCity.value = data.city;
   eoPincode.value = data.pincode;
   eoShipping.value = data.shipping_amount;
+  eoPaymentType.value = data.payment_type || "";
   const states = INDIA_STATES.includes(data.state) || !data.state ? INDIA_STATES : [data.state, ...INDIA_STATES];
   eoState.innerHTML = `<option value="">Select…</option>` +
     states.map((st) => `<option value="${escapeHtml(st)}">${escapeHtml(st)}</option>`).join("");
@@ -898,6 +900,7 @@ async function eoSave(reprintTab) {
     state: eoState.value,
     pincode: eoPincode.value.trim(),
     shipping_amount: eoShipping.value || 0,
+    payment_type: eoPaymentType.value || null,
     items,
     remove_ids,
   };

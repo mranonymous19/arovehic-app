@@ -2042,7 +2042,9 @@ def api_order_edit_data(order_id):
     cur.execute("SELECT * FROM items WHERE shopify_order_id = %s ORDER BY sort_order", (order_id,))
     items = cur.fetchall()
     cur.close()
+    cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
     return jsonify({
+        "payment_type": resolve_payment_type(o, cod_threshold),
         "order_id": o["shopify_order_id"],
         "order_name": o["order_name"],
         "customer_name": o["customer_name"] or "",
@@ -2090,6 +2092,11 @@ def api_edit_order(order_id):
         new_shipping = 0.0
     if new_shipping < 0:
         errors.append("Delivery charge can't be negative")
+
+    # Optional: switch the order between Prepaid and COD (postpaid).
+    requested_payment = data.get("payment_type") or None
+    if requested_payment not in (None, "cod", "prepaid"):
+        errors.append("Payment type must be COD or Prepaid")
 
     items_in = data.get("items") or []
     remove_ids = set(data.get("remove_ids") or [])
@@ -2233,9 +2240,24 @@ def api_edit_order(order_id):
     if abs(new_shipping - old_shipping) > 0.001:
         changes.append(f"delivery charge {old_shipping:.2f} -> {new_shipping:.2f}")
 
+    # ---- explicit Prepaid <-> COD switch ----
+    cod_threshold_now = float(get_setting("cod_shipping_threshold", "140") or 140)
+    current_payment = resolve_payment_type(order, cod_threshold_now)
+    payment_switched = bool(requested_payment) and requested_payment != current_payment
+    if payment_switched:
+        set_payment_type = requested_payment
+        changes.append(
+            f"payment type {(current_payment or 'unknown').upper()} -> {requested_payment.upper()}"
+        )
+
     # ---- keep COD "balance_due" consistent with the new item list ----
     new_balance = order["balance_due"]
-    if order["balance_due"] is not None:
+    if payment_switched and requested_payment == "cod":
+        # Shopify's outstanding balance on a prepaid order is 0 (or stale), which
+        # would make "Amount to be Received" show 0. Clear it so the COD amount
+        # is the full total: billed items + delivery charge.
+        new_balance = None
+    elif order["balance_due"] is not None:
         _eff, na_new, pd_new, billing_new = _effective_balance(None, list(new_state.values()))
         target_eff = eff_old + (billing_new - billing_old) + (new_shipping - old_shipping)
         new_balance = round(target_eff + na_new - pd_new, 2)
@@ -2247,6 +2269,10 @@ def api_edit_order(order_id):
         (customer_name, phone, full_address, address1, address2, city, state, pincode,
          new_shipping, new_balance, set_payment_type, order_id),
     )
+    if payment_switched:
+        # amount_to_receive is locked in at invoice print time; it's recomputed on the
+        # next (re)print, so drop the stale figure now.
+        cur.execute("UPDATE orders SET amount_to_receive = NULL WHERE shopify_order_id = %s", (order_id,))
     # The Tally XML is built live from the order/items, so it always carries the
     # edited figures — no invoice reprint needed. If this order was already
     # exported, clear that mark so it shows up again in the next "Only new" XML.
