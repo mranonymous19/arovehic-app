@@ -981,6 +981,19 @@ def resolve_payment_type(order_row, cod_threshold):
     return "cod" if float(shipping_amount) >= cod_threshold else "prepaid"
 
 
+def invoice_number_for_payment(invoice_number, payment_type):
+    """Swap the SHP/COD prefix of an existing invoice number to match the
+    payment type (COD -> "COD/...", anything else -> "SHP/..."). The running
+    sequence and year are kept. Numbers with any other format are returned
+    unchanged."""
+    if not invoice_number or "/" not in invoice_number:
+        return invoice_number
+    prefix, rest = invoice_number.split("/", 1)
+    if prefix not in ("SHP", "COD"):
+        return invoice_number
+    return ("COD" if payment_type == "cod" else "SHP") + "/" + rest
+
+
 def price_edit_delta(billing_items):
     """How much the manually edited item prices changed the order total vs
     what Shopify billed (sum of (new - original) x qty). Shopify's
@@ -1527,8 +1540,15 @@ def api_order_invoice(order_id):
             (invoice_number, invoice_date, session["name"], order_id),
         )
     else:
-        invoice_number = order["invoice_number"]
+        invoice_number = invoice_number_for_payment(order["invoice_number"], payment_type)
         invoice_date = order["invoice_date"]
+        if invoice_number != order["invoice_number"]:
+            # Payment type changed after first print (or before this fix) —
+            # bring the stored number in line with it.
+            cur.execute(
+                "UPDATE orders SET invoice_number = %s WHERE shopify_order_id = %s",
+                (invoice_number, order_id),
+            )
         # Reprinting updates who last touched it — "who gave the print" is
         # answered by whoever most recently printed or reprinted it, not
         # necessarily whoever first issued the invoice number.
@@ -2299,6 +2319,14 @@ def api_edit_order(order_id):
         # amount_to_receive is locked in at invoice print time; it's recomputed on the
         # next (re)print, so drop the stale figure now.
         cur.execute("UPDATE orders SET amount_to_receive = NULL WHERE shopify_order_id = %s", (order_id,))
+    # An already-printed invoice keeps its number, but the SHP/ vs COD/ prefix
+    # must follow the payment type — otherwise a Prepaid -> COD edit leaves a
+    # COD order carrying an SHP/... number (and the reverse).
+    if payment_switched and order["invoice_number"]:
+        new_inv = invoice_number_for_payment(order["invoice_number"], set_payment_type)
+        if new_inv != order["invoice_number"]:
+            cur.execute("UPDATE orders SET invoice_number = %s WHERE shopify_order_id = %s", (new_inv, order_id))
+            changes.append(f"invoice no. {order['invoice_number']} -> {new_inv}")
     # The Tally XML is built live from the order/items, so it always carries the
     # edited figures — no invoice reprint needed. If this order was already
     # exported, clear that mark so it shows up again in the next "Only new" XML.
