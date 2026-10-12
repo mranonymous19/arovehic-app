@@ -152,6 +152,28 @@ def init_db():
             created_at TEXT NOT NULL
         );
 
+        -- Repurchase: items re-bought and re-sent after damage. Deliberately its
+        -- own table, not tied to orders/invoices/Tally — the original bill is
+        -- already in Tally and must never be duplicated or changed by this.
+        CREATE TABLE IF NOT EXISTS repurchases (
+            id SERIAL PRIMARY KEY,
+            shopify_order_id TEXT,
+            order_name TEXT,
+            customer_name TEXT,
+            customer_phone TEXT,
+            item_id TEXT,
+            title TEXT,
+            variant_title TEXT,
+            vendor TEXT,
+            quantity INTEGER NOT NULL DEFAULT 1,
+            reason TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_by TEXT,
+            created_at TEXT,
+            updated_by TEXT,
+            updated_at TEXT
+        );
+
         CREATE INDEX IF NOT EXISTS idx_items_order_id ON items (shopify_order_id);
         CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders (created_at DESC);
         """
@@ -351,6 +373,18 @@ def telecaller_or_owner_required(f):
     def wrapper(*args, **kwargs):
         if session.get("role") not in ("owner", "telecaller"):
             return jsonify({"error": "Only telecallers and the owner can add orders"}), 403
+        return f(*args, **kwargs)
+
+    return wrapper
+
+
+def repurchase_required(f):
+    """Owner (admin) and telecallers only."""
+    @wraps(f)
+    @login_required
+    def wrapper(*args, **kwargs):
+        if session.get("role") not in ("owner", "telecaller"):
+            return jsonify({"error": "Only the owner and telecallers can use Repurchase"}), 403
         return f(*args, **kwargs)
 
     return wrapper
@@ -2438,6 +2472,175 @@ def api_update_order_packed(order_id):
     db.commit()
     cur.close()
     return jsonify({"ok": True, "order_id": order_id, "packed": packed, "packed_by": packed_by, "packed_at": packed_at})
+
+
+# ---------------------------------------------------------------------------
+# Repurchase (owner + telecaller only). Completely separate from the order /
+# invoice / Tally flow: nothing here touches orders, items or invoice numbers.
+# ---------------------------------------------------------------------------
+REPURCHASE_STATUSES = ("pending", "purchased", "resent")
+
+
+@app.route("/api/orders/<order_id>/repurchase-items")
+@repurchase_required
+def api_repurchase_items(order_id):
+    """All items of an order (for the 'which items need repurchase' popup),
+    with how many of each are already in Repurchase."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT order_name, customer_name FROM orders WHERE shopify_order_id = %s", (order_id,))
+    order = cur.fetchone()
+    if not order:
+        cur.close()
+        return jsonify({"error": "Order not found"}), 404
+    cur.execute(
+        "SELECT id, title, variant_title, quantity FROM items WHERE shopify_order_id = %s ORDER BY sort_order",
+        (order_id,),
+    )
+    items = cur.fetchall()
+    cur.execute(
+        "SELECT item_id, COALESCE(SUM(quantity), 0) AS qty FROM repurchases "
+        "WHERE shopify_order_id = %s GROUP BY item_id",
+        (order_id,),
+    )
+    already = {r["item_id"]: int(r["qty"]) for r in cur.fetchall()}
+    cur.close()
+    return jsonify({
+        "order_id": order_id,
+        "order_name": order["order_name"],
+        "customer_name": order["customer_name"],
+        "items": [
+            {
+                "id": i["id"],
+                "title": i["title"],
+                "variant_title": i["variant_title"],
+                "quantity": i["quantity"] or 1,
+                "already_repurchased": already.get(i["id"], 0),
+            }
+            for i in items
+        ],
+    })
+
+
+@app.route("/api/orders/<order_id>/repurchase", methods=["POST"])
+@repurchase_required
+def api_add_repurchase(order_id):
+    data = request.get_json(force=True) or {}
+    picked = data.get("items") or []
+    reason = (data.get("reason") or "").strip()
+    if not picked:
+        return jsonify({"error": "Select at least one item"}), 400
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute(
+        "SELECT order_name, customer_name, customer_phone FROM orders WHERE shopify_order_id = %s",
+        (order_id,),
+    )
+    order = cur.fetchone()
+    if not order:
+        cur.close()
+        return jsonify({"error": "Order not found"}), 404
+    cur.execute(
+        "SELECT id, title, variant_title, vendor, quantity FROM items WHERE shopify_order_id = %s",
+        (order_id,),
+    )
+    order_items = {i["id"]: i for i in cur.fetchall()}
+
+    who = session.get("name", "")
+    now = datetime.now(timezone.utc).isoformat()
+    added = []
+    for p in picked:
+        item = order_items.get((p or {}).get("id"))
+        if not item:
+            cur.close()
+            return jsonify({"error": "An item doesn't belong to this order"}), 400
+        try:
+            qty = int(p.get("quantity") or 1)
+        except (TypeError, ValueError):
+            qty = 0
+        max_qty = item["quantity"] or 1
+        if qty < 1 or qty > max_qty:
+            cur.close()
+            return jsonify({"error": f"Quantity for {item['title']} must be between 1 and {max_qty}"}), 400
+        cur.execute(
+            "INSERT INTO repurchases (shopify_order_id, order_name, customer_name, customer_phone, item_id, "
+            "title, variant_title, vendor, quantity, reason, status, created_by, created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s)",
+            (order_id, order["order_name"], order["customer_name"], order["customer_phone"], item["id"],
+             item["title"], item["variant_title"], item["vendor"], qty, reason or None, who, now),
+        )
+        added.append(f"{item['title']} x{qty}")
+
+    log_activity(
+        cur, None, order["order_name"] or order_id, "repurchase_add",
+        f"{who} added to Repurchase from {order['order_name'] or order_id}: " + ", ".join(added),
+        order_id=order_id,
+    )
+    db.commit()
+    cur.close()
+    return jsonify({"ok": True, "added": len(added)})
+
+
+@app.route("/api/repurchases")
+@repurchase_required
+def api_list_repurchases():
+    status = request.args.get("status")
+    db = get_db()
+    cur = db.cursor()
+    if status in REPURCHASE_STATUSES:
+        cur.execute("SELECT * FROM repurchases WHERE status = %s ORDER BY id DESC", (status,))
+    else:
+        cur.execute("SELECT * FROM repurchases ORDER BY id DESC")
+    rows = cur.fetchall()
+    cur.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/repurchases/<int:rid>/status", methods=["POST"])
+@repurchase_required
+def api_repurchase_status(rid):
+    data = request.get_json(force=True) or {}
+    status = data.get("status")
+    if status not in REPURCHASE_STATUSES:
+        return jsonify({"error": "Invalid status"}), 400
+    who = session.get("name", "")
+    db = get_db()
+    cur = db.cursor()
+    cur.execute(
+        "UPDATE repurchases SET status = %s, updated_by = %s, updated_at = %s WHERE id = %s "
+        "RETURNING order_name, shopify_order_id, title",
+        (status, who, datetime.now(timezone.utc).isoformat(), rid),
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        return jsonify({"error": "Not found"}), 404
+    log_activity(cur, None, row["order_name"] or row["shopify_order_id"], "repurchase_status",
+                 f"{who} set repurchase of {row['title']} ({row['order_name']}) to {status}",
+                 order_id=row["shopify_order_id"])
+    db.commit()
+    cur.close()
+    return jsonify({"ok": True, "status": status})
+
+
+@app.route("/api/repurchases/<int:rid>", methods=["DELETE"])
+@repurchase_required
+def api_delete_repurchase(rid):
+    who = session.get("name", "")
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("DELETE FROM repurchases WHERE id = %s RETURNING order_name, shopify_order_id, title", (rid,))
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        return jsonify({"error": "Not found"}), 404
+    log_activity(cur, None, row["order_name"] or row["shopify_order_id"], "repurchase_delete",
+                 f"{who} removed {row['title']} ({row['order_name']}) from Repurchase",
+                 order_id=row["shopify_order_id"])
+    db.commit()
+    cur.close()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/orders/<order_id>/cancelled", methods=["POST"])

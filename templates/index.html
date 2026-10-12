@@ -19,6 +19,7 @@
       <button id="usersBtn" class="btn btn-ghost" hidden>Manage Users</button>
       <button id="activityLogBtn" class="btn btn-ghost" hidden>Activity Log</button>
       <button id="cancelledBtn" class="btn btn-ghost" hidden>Cancelled Orders</button>
+      <button id="repurchaseBtn" class="btn btn-ghost" hidden>Repurchase</button>
       <button id="trashBtn" class="btn btn-ghost" hidden>Trash</button>
       <span id="userBadge" class="user-badge"></span>
       <button id="accountBtn" class="btn btn-ghost">Account</button>
@@ -383,6 +384,40 @@
       <div id="activityLogList"><p class="empty-log">Loading…</p></div>
       <div class="modal-actions">
         <button id="closeActivityLogBtn" class="btn btn-ghost">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Repurchase: pick the damaged items of one order -->
+  <div id="repurchaseModal" class="modal" hidden>
+    <div class="modal-box modal-box-wide">
+      <h2 id="rpTitle">Repurchase</h2>
+      <p class="modal-subtext">Tick only the items that need to be re-purchased and re-sent. The original order and its bill are not changed.</p>
+      <div id="rpItems"><p class="empty-log">Loading…</p></div>
+      <label>Reason (optional)
+        <input id="rpReason" type="text" placeholder="e.g. damaged in transit">
+      </label>
+      <div class="modal-actions">
+        <button id="rpCancelBtn" class="btn btn-ghost" type="button">Cancel</button>
+        <button id="rpSaveBtn" class="btn btn-primary" type="button">Add to Repurchase</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Repurchase: the separate list -->
+  <div id="repurchaseListModal" class="modal" hidden>
+    <div class="modal-box modal-box-wide">
+      <h2>Repurchase</h2>
+      <p class="modal-subtext">Items being re-purchased and re-sent. Separate from orders, invoices and Tally.</p>
+      <select id="rpStatusFilter" class="status-filter-select">
+        <option value="">All</option>
+        <option value="pending" selected>Pending</option>
+        <option value="purchased">Purchased</option>
+        <option value="resent">Resent</option>
+      </select>
+      <div id="rpList"><p class="empty-log">Loading…</p></div>
+      <div class="modal-actions">
+        <button id="rpListCloseBtn" class="btn btn-ghost" type="button">Close</button>
       </div>
     </div>
   </div>

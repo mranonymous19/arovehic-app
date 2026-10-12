@@ -88,6 +88,7 @@ const closeAccountBtn = document.getElementById("closeAccountBtn");
 
 const usersBtn = document.getElementById("usersBtn");
 const trashBtn = document.getElementById("trashBtn");
+const repurchaseBtn = document.getElementById("repurchaseBtn");
 const cancelledBtn = document.getElementById("cancelledBtn");
 const refundedFilterOption = document.getElementById("refundedFilterOption");
 const usersModal = document.getElementById("usersModal");
@@ -134,6 +135,7 @@ async function loadMe() {
   usersBtn.hidden = !isOwner;
   activityLogBtn.hidden = !(isOwner || currentRole === "telecaller");
   trashBtn.hidden = !(isOwner || currentRole === "telecaller");
+  repurchaseBtn.hidden = !(isOwner || currentRole === "telecaller");
   cancelledBtn.hidden = !(isOwner || currentRole === "telecaller");
   // Accounts/Packer are locked to a single Billing-only view already — an
   // arrived/pending breakdown isn't meaningful there, so the Summary
@@ -667,6 +669,7 @@ function renderOrders(orders) {
         ${canManageCancel ? `<label class="order-cancelled-checkbox"><input type="checkbox" class="order-cancelled-input" ${order.cancelled ? "checked" : ""} /> Cancelled</label>` : ""}
         ${canCancelBill ? `<button type="button" class="btn btn-ghost btn-small btn-danger order-bill-cancel-link">${order.bill_cancelled ? "Restore Bill" : "Cancel Bill"}</button>` : ""}
         ${canPrintInvoice && !order.bill_cancelled ? `<button type="button" class="btn btn-ghost btn-small order-invoice-link" data-order-id="${escapeHtml(order.order_id)}">${order.invoice_number ? "Reprint Invoice" : "Print Invoice"}</button>` : ""}
+        ${(currentRole === "owner" || currentRole === "telecaller") && currentFilter !== "trash" ? `<button type="button" class="btn btn-ghost btn-small order-repurchase-link" data-order-id="${escapeHtml(order.order_id)}">Repurchase</button>` : ""}
         ${(currentRole === "owner" || currentRole === "telecaller") ? `<button type="button" class="order-history-link" data-order-id="${escapeHtml(order.order_id)}">History</button>` : ""}
         ${currentRole === "owner" && currentFilter === "trash" ? `<button type="button" class="btn btn-primary btn-small order-restore-link" data-order-id="${escapeHtml(order.order_id)}">Restore</button>` : ""}
         ${currentRole === "owner" && currentFilter !== "trash" ? `<button type="button" class="btn btn-ghost btn-small btn-danger order-delete-link" data-order-id="${escapeHtml(order.order_id)}">Delete</button>` : ""}
@@ -695,6 +698,8 @@ function renderOrders(orders) {
         }
       });
     }
+    const rpLink = head.querySelector(".order-repurchase-link");
+    if (rpLink) rpLink.addEventListener("click", () => openRepurchasePicker(order.order_id));
     if (canCancelBill) {
       head.querySelector(".order-bill-cancel-link").addEventListener("click", () => {
         const label = order.invoice_number ? `bill ${order.invoice_number}` : `the bill of ${order.order_name || order.order_id}`;
@@ -1351,6 +1356,123 @@ cancelledBtn.addEventListener("click", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Repurchase (owner + telecaller) — separate from orders/invoices/Tally
+// ---------------------------------------------------------------------------
+const repurchaseModal = document.getElementById("repurchaseModal");
+const rpItems = document.getElementById("rpItems");
+const rpReason = document.getElementById("rpReason");
+const rpTitle = document.getElementById("rpTitle");
+const repurchaseListModal = document.getElementById("repurchaseListModal");
+const rpList = document.getElementById("rpList");
+const rpStatusFilter = document.getElementById("rpStatusFilter");
+let rpOrderId = null;
+
+async function openRepurchasePicker(orderId) {
+  rpOrderId = orderId;
+  rpReason.value = "";
+  rpItems.innerHTML = `<p class="empty-log">Loading…</p>`;
+  repurchaseModal.hidden = false;
+  const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/repurchase-items`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    rpItems.innerHTML = `<p class="empty-log">${escapeHtml(err.error || "Could not load items.")}</p>`;
+    return;
+  }
+  const data = await res.json();
+  rpTitle.textContent = `Repurchase — ${data.order_name || orderId}`;
+  if (!data.items.length) {
+    rpItems.innerHTML = `<p class="empty-log">This order has no items.</p>`;
+    return;
+  }
+  rpItems.innerHTML = data.items.map((it) => `
+    <div class="rp-item" data-item-id="${escapeHtml(it.id)}">
+      <label class="rp-item-main">
+        <input type="checkbox" class="rp-check" />
+        <span>${escapeHtml(it.title || "Item")}${it.variant_title ? ` <small>(${escapeHtml(it.variant_title)})</small>` : ""}
+          ${it.already_repurchased ? `<small class="rp-already">already in Repurchase ×${it.already_repurchased}</small>` : ""}</span>
+      </label>
+      <span class="rp-qty">Qty <input type="number" class="rp-qty-input" min="1" max="${it.quantity}" value="${it.quantity}" /> of ${it.quantity}</span>
+    </div>`).join("");
+}
+
+document.getElementById("rpCancelBtn").addEventListener("click", () => { repurchaseModal.hidden = true; });
+document.getElementById("rpSaveBtn").addEventListener("click", async () => {
+  const picked = [...rpItems.querySelectorAll(".rp-item")]
+    .filter((row) => row.querySelector(".rp-check").checked)
+    .map((row) => ({ id: row.dataset.itemId, quantity: parseInt(row.querySelector(".rp-qty-input").value, 10) || 1 }));
+  if (!picked.length) {
+    showMessage("Select at least one item.", true);
+    return;
+  }
+  const res = await fetch(`/api/orders/${encodeURIComponent(rpOrderId)}/repurchase`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items: picked, reason: rpReason.value.trim() }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    showMessage(err.error || "Could not add to Repurchase.", true);
+    return;
+  }
+  repurchaseModal.hidden = true;
+  showMessage(`Added ${picked.length} item${picked.length > 1 ? "s" : ""} to Repurchase`);
+});
+
+async function loadRepurchases() {
+  rpList.innerHTML = `<p class="empty-log">Loading…</p>`;
+  const status = rpStatusFilter.value;
+  const res = await fetch(status ? `/api/repurchases?status=${encodeURIComponent(status)}` : "/api/repurchases");
+  if (!res.ok) {
+    rpList.innerHTML = `<p class="empty-log">Could not load Repurchase list.</p>`;
+    return;
+  }
+  const rows = await res.json();
+  if (!rows.length) {
+    rpList.innerHTML = `<p class="empty-log">Nothing here yet.</p>`;
+    return;
+  }
+  rpList.innerHTML = rows.map((r) => `
+    <div class="rp-row" data-id="${r.id}">
+      <div class="rp-row-main">
+        <strong>${escapeHtml(r.title || "Item")}</strong>${r.variant_title ? ` <small>(${escapeHtml(r.variant_title)})</small>` : ""} × ${r.quantity}
+        <div class="rp-row-sub">${escapeHtml(r.order_name || "")} · ${escapeHtml(r.customer_name || "")}${r.customer_phone ? " · " + escapeHtml(r.customer_phone) : ""}</div>
+        ${r.reason ? `<div class="rp-row-sub">Reason: ${escapeHtml(r.reason)}</div>` : ""}
+        <div class="rp-row-sub">Added by ${escapeHtml(r.created_by || "")}${r.created_at ? " · " + escapeHtml(new Date(r.created_at).toLocaleString()) : ""}</div>
+      </div>
+      <div class="rp-row-actions">
+        <select class="rp-status-select">
+          ${["pending", "purchased", "resent"].map((s) => `<option value="${s}" ${r.status === s ? "selected" : ""}>${s[0].toUpperCase() + s.slice(1)}</option>`).join("")}
+        </select>
+        <button type="button" class="btn btn-ghost btn-small btn-danger rp-delete">Remove</button>
+      </div>
+    </div>`).join("");
+  rpList.querySelectorAll(".rp-row").forEach((row) => {
+    const id = row.dataset.id;
+    row.querySelector(".rp-status-select").addEventListener("change", async (e) => {
+      const res = await fetch(`/api/repurchases/${id}/status`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: e.target.value }),
+      });
+      if (!res.ok) { showMessage("Could not update status.", true); }
+      loadRepurchases();
+    });
+    row.querySelector(".rp-delete").addEventListener("click", async () => {
+      if (!confirm("Remove this item from Repurchase?")) return;
+      const res = await fetch(`/api/repurchases/${id}`, { method: "DELETE" });
+      if (!res.ok) { showMessage("Could not remove.", true); return; }
+      loadRepurchases();
+    });
+  });
+}
+
+repurchaseBtn.addEventListener("click", () => {
+  repurchaseListModal.hidden = false;
+  loadRepurchases();
+});
+rpStatusFilter.addEventListener("change", loadRepurchases);
+document.getElementById("rpListCloseBtn").addEventListener("click", () => { repurchaseListModal.hidden = true; });
+
+// ---------------------------------------------------------------------------
 // Date range filter
 // ---------------------------------------------------------------------------
 
@@ -1660,6 +1782,9 @@ const ACTIVITY_ACTION_LABELS = {
   purchase_amount_update: "Amount",
   packed_update: "Packed",
   cancelled_update: "Cancelled",
+  repurchase_add: "Repurchase",
+  repurchase_status: "Repurchase status",
+  repurchase_delete: "Repurchase removed",
   sync: "Sync",
   manual_add: "Added (paste)",
   order_edit: "Order edited",
