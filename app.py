@@ -219,6 +219,11 @@ def init_db():
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_cancelled_at TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_edited BOOLEAN NOT NULL DEFAULT false;
         ALTER TABLE items ADD COLUMN IF NOT EXISTS item_edited BOOLEAN NOT NULL DEFAULT false;
+        ALTER TABLE repurchases ADD COLUMN IF NOT EXISTS batch TEXT;
+        ALTER TABLE repurchases ADD COLUMN IF NOT EXISTS price NUMERIC;
+        ALTER TABLE repurchases ADD COLUMN IF NOT EXISTS invoice_number TEXT;
+        ALTER TABLE repurchases ADD COLUMN IF NOT EXISTS invoice_date TEXT;
+        ALTER TABLE repurchases ADD COLUMN IF NOT EXISTS invoice_printed_by TEXT;
         """
     )
     # Migration: tables created before the 'packer'/'accounts' roles existed
@@ -385,6 +390,17 @@ def repurchase_required(f):
     def wrapper(*args, **kwargs):
         if session.get("role") not in ("owner", "telecaller"):
             return jsonify({"error": "Only the owner and telecallers can use Repurchase"}), 403
+        return f(*args, **kwargs)
+
+    return wrapper
+
+
+def repurchase_view_required(f):
+    """Any logged-in role can open the Repurchase list; what each role can DO
+    in it (set Purchased / set Sent / remove / print) is checked per endpoint."""
+    @wraps(f)
+    @login_required
+    def wrapper(*args, **kwargs):
         return f(*args, **kwargs)
 
     return wrapper
@@ -1706,7 +1722,21 @@ def _collect_invoices_for_tally(date_from, date_to, only_new):
                          if i["status"] in ("purchased", "stock")]
         if not billing_items:
             continue
-        result.append((dict(o), billing_items, resolve_payment_type(o, cod_threshold) or "prepaid"))
+        od = dict(o)
+        ptype = resolve_payment_type(o, cod_threshold) or "prepaid"
+        # An order printed before the SHP/COD fix (or edited since) may carry the
+        # wrong prefix; export the number that matches its payment type.
+        fixed_no = invoice_number_for_payment(od["invoice_number"], ptype)
+        if fixed_no != od["invoice_number"]:
+            fix_cur = db.cursor()
+            fix_cur.execute(
+                "UPDATE orders SET invoice_number = %s WHERE shopify_order_id = %s",
+                (fixed_no, od["shopify_order_id"]),
+            )
+            db.commit()
+            fix_cur.close()
+            od["invoice_number"] = fixed_no
+        result.append((od, billing_items, ptype))
     return result
 
 
@@ -2542,16 +2572,27 @@ def api_add_repurchase(order_id):
         cur.close()
         return jsonify({"error": "Order not found"}), 404
     cur.execute(
-        "SELECT id, title, variant_title, vendor, quantity FROM items WHERE shopify_order_id = %s",
+        "SELECT id, title, variant_title, vendor, quantity, price FROM items WHERE shopify_order_id = %s",
         (order_id,),
     )
     order_items = {i["id"]: i for i in cur.fetchall()}
+    batch = uuid.uuid4().hex  # one repurchase bill per "Add to Repurchase" action
+
+    cur.execute(
+        "SELECT item_id, COALESCE(SUM(quantity), 0) AS qty FROM repurchases "
+        "WHERE shopify_order_id = %s GROUP BY item_id",
+        (order_id,),
+    )
+    already = {r["item_id"]: int(r["qty"]) for r in cur.fetchall()}
 
     who = session.get("name", "")
     now = datetime.now(timezone.utc).isoformat()
     added = []
     for p in picked:
-        item = order_items.get((p or {}).get("id"))
+        if not isinstance(p, dict):
+            cur.close()
+            return jsonify({"error": "Invalid item"}), 400
+        item = order_items.get(p.get("id"))
         if not item:
             cur.close()
             return jsonify({"error": "An item doesn't belong to this order"}), 400
@@ -2563,12 +2604,20 @@ def api_add_repurchase(order_id):
         if qty < 1 or qty > max_qty:
             cur.close()
             return jsonify({"error": f"Quantity for {item['title']} must be between 1 and {max_qty}"}), 400
+        room = max_qty - already.get(item["id"], 0)
+        if qty > room:
+            cur.close()
+            msg = (f"{item['title']} is already fully in Repurchase" if room <= 0
+                   else f"Only {room} more of {item['title']} can be added to Repurchase")
+            return jsonify({"error": msg}), 400
+        already[item["id"]] = already.get(item["id"], 0) + qty
         cur.execute(
             "INSERT INTO repurchases (shopify_order_id, order_name, customer_name, customer_phone, item_id, "
-            "title, variant_title, vendor, quantity, reason, status, created_by, created_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s)",
+            "title, variant_title, vendor, quantity, reason, status, created_by, created_at, batch, price) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',%s,%s,%s,%s)",
             (order_id, order["order_name"], order["customer_name"], order["customer_phone"], item["id"],
-             item["title"], item["variant_title"], item["vendor"], qty, reason or None, who, now),
+             item["title"], item["variant_title"], item["vendor"], qty, reason or None, who, now,
+             batch, _to_float(item["price"])),
         )
         added.append(f"{item['title']} x{qty}")
 
@@ -2582,46 +2631,198 @@ def api_add_repurchase(order_id):
     return jsonify({"ok": True, "added": len(added)})
 
 
+def _to_float(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# Who may move a repurchase to which status. Owner/telecaller: any. Staff buy
+# the item (Pending <-> Purchased). Packers send it (Purchased <-> Sent) and
+# only once it has been purchased. Accounts only view/print.
+def _repurchase_status_allowed(role, current, new):
+    if role in ("owner", "telecaller"):
+        return True
+    if role == "staff":
+        return new in ("pending", "purchased") and current in ("pending", "purchased")
+    if role == "packer":
+        return (new == "resent" and current == "purchased") or (new == "purchased" and current == "resent")
+    return False
+
+
 @app.route("/api/repurchases")
-@repurchase_required
+@repurchase_view_required
 def api_list_repurchases():
     status = request.args.get("status")
+    role = session.get("role")
     db = get_db()
     cur = db.cursor()
+    where, params = [], []
     if status in REPURCHASE_STATUSES:
-        cur.execute("SELECT * FROM repurchases WHERE status = %s ORDER BY id DESC", (status,))
-    else:
-        cur.execute("SELECT * FROM repurchases ORDER BY id DESC")
+        where.append("status = %s")
+        params.append(status)
+    if role == "packer":
+        # Packers only deal with what is already bought and waiting to be sent.
+        where.append("status IN ('purchased', 'resent')")
+    sql = "SELECT *, COALESCE(batch, 'r' || id::text) AS batch_key FROM repurchases"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC"
+    cur.execute(sql, params)
     rows = cur.fetchall()
     cur.close()
-    return jsonify([dict(r) for r in rows])
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["price"] = _to_float(d.get("price"))
+        out.append(d)
+    return jsonify({"role": role, "rows": out})
 
 
 @app.route("/api/repurchases/<int:rid>/status", methods=["POST"])
-@repurchase_required
+@repurchase_view_required
 def api_repurchase_status(rid):
     data = request.get_json(force=True) or {}
     status = data.get("status")
     if status not in REPURCHASE_STATUSES:
         return jsonify({"error": "Invalid status"}), 400
     who = session.get("name", "")
+    role = session.get("role")
     db = get_db()
     cur = db.cursor()
+    cur.execute("SELECT status FROM repurchases WHERE id = %s FOR UPDATE", (rid,))
+    existing = cur.fetchone()
+    if not existing:
+        cur.close()
+        return jsonify({"error": "Not found"}), 404
+    if not _repurchase_status_allowed(role, existing["status"], status):
+        cur.close()
+        msg = {
+            "staff": "Staff can only mark items Pending or Purchased",
+            "packer": "Packers can only mark a purchased item as Sent",
+        }.get(role, "You can't change Repurchase status")
+        return jsonify({"error": msg}), 403
     cur.execute(
         "UPDATE repurchases SET status = %s, updated_by = %s, updated_at = %s WHERE id = %s "
         "RETURNING order_name, shopify_order_id, title",
         (status, who, datetime.now(timezone.utc).isoformat(), rid),
     )
     row = cur.fetchone()
-    if not row:
-        cur.close()
-        return jsonify({"error": "Not found"}), 404
     log_activity(cur, None, row["order_name"] or row["shopify_order_id"], "repurchase_status",
                  f"{who} set repurchase of {row['title']} ({row['order_name']}) to {status}",
                  order_id=row["shopify_order_id"])
     db.commit()
     cur.close()
     return jsonify({"ok": True, "status": status})
+
+
+def repurchase_invoice_required(f):
+    """Owner, telecaller, accounts, staff may print a Repurchase bill. Staff
+    only the first copy (same rule as normal invoices) — checked in the route."""
+    @wraps(f)
+    @login_required
+    def wrapper(*args, **kwargs):
+        if session.get("role") not in ("owner", "telecaller", "accounts", "staff"):
+            return jsonify({"error": "You can't print Repurchase invoices"}), 403
+        return f(*args, **kwargs)
+
+    return wrapper
+
+
+@app.route("/api/repurchases/batch/<batch_key>/invoice.pdf")
+@repurchase_invoice_required
+def api_repurchase_invoice(batch_key):
+    """Separate RPR/<n>/<year> bill for one repurchase batch. Own counter, own
+    columns — never reads or writes the original order's invoice number,
+    invoice date, or Tally flag, and is not part of the Tally export."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute(
+        "SELECT * FROM repurchases WHERE COALESCE(batch, 'r' || id::text) = %s ORDER BY id FOR UPDATE",
+        (batch_key,),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        cur.close()
+        return jsonify({"error": "Repurchase entry not found"}), 404
+    if any(r["status"] == "pending" for r in rows):
+        cur.close()
+        return jsonify({"error": "Mark every item in this repurchase as Purchased before printing the invoice"}), 400
+
+    existing_no = next((r["invoice_number"] for r in rows if r["invoice_number"]), None)
+    if session.get("role") == "staff" and existing_no:
+        cur.close()
+        return jsonify({"error": "This invoice has already been printed — ask accounts or the owner to reprint it"}), 403
+
+    # Read-only look at the original order for the customer/address block.
+    cur.execute("SELECT * FROM orders WHERE shopify_order_id = %s", (rows[0]["shopify_order_id"],))
+    order = cur.fetchone()
+    cur.execute(
+        "SELECT id, price FROM items WHERE shopify_order_id = %s", (rows[0]["shopify_order_id"],)
+    )
+    item_price = {i["id"]: _to_float(i["price"]) for i in cur.fetchall()}
+
+    is_first_print = not existing_no
+    if is_first_print:
+        cur.execute("SELECT value FROM settings WHERE key = %s FOR UPDATE", ("rpr_seq_next",))
+        srow = cur.fetchone()
+        seq = int(srow["value"]) if srow else 1
+        cur.execute(
+            "INSERT INTO settings (key, value) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            ("rpr_seq_next", str(seq + 1)),
+        )
+        now = datetime.now()
+        invoice_number = f"RPR/{seq}/{now.year}"
+        invoice_date = now.strftime("%-d-%b-%y")
+        cur.execute(
+            "UPDATE repurchases SET invoice_number = %s, invoice_date = %s, invoice_printed_by = %s "
+            "WHERE COALESCE(batch, 'r' || id::text) = %s",
+            (invoice_number, invoice_date, session["name"], batch_key),
+        )
+    else:
+        invoice_number = existing_no
+        invoice_date = next((r["invoice_date"] for r in rows if r["invoice_date"]), "")
+        cur.execute(
+            "UPDATE repurchases SET invoice_printed_by = %s WHERE COALESCE(batch, 'r' || id::text) = %s",
+            (session["name"], batch_key),
+        )
+
+    log_activity(
+        cur, None, rows[0]["order_name"] or rows[0]["shopify_order_id"],
+        "repurchase_invoice",
+        f"{session['name']} {'printed' if is_first_print else 'reprinted'} repurchase invoice {invoice_number}",
+        order_id=rows[0]["shopify_order_id"],
+    )
+    db.commit()
+    cur.close()
+
+    order_dict = dict(order) if order else {}
+    order_dict.update({
+        "customer_name": order_dict.get("customer_name") or rows[0]["customer_name"],
+        "customer_phone": order_dict.get("customer_phone") or rows[0]["customer_phone"],
+        "order_name": rows[0]["order_name"],
+        "shipping_amount": 0,        # no delivery charge on a repurchase bill
+        "payment_type": "prepaid",   # shows "Amount is Received" — nothing to collect
+        "balance_due": None,
+    })
+    items = []
+    for r in rows:
+        price = _to_float(r["price"])
+        if price is None:
+            price = item_price.get(r["item_id"]) or 0
+        items.append({
+            "title": r["title"], "variant_title": r["variant_title"],
+            "quantity": r["quantity"], "price": price,
+        })
+
+    pdf_buf = build_invoice_pdf(order_dict, items, invoice_number, invoice_date)
+    response = send_file(pdf_buf, mimetype="application/pdf", as_attachment=False,
+                         download_name=invoice_number.replace("/", "-") + ".pdf")
+    response.headers["X-Invoice-Number"] = invoice_number
+    response.headers["Access-Control-Expose-Headers"] = "X-Invoice-Number"
+    return response
 
 
 @app.route("/api/repurchases/<int:rid>", methods=["DELETE"])

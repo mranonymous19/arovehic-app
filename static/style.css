@@ -986,3 +986,14 @@ main {
 .rp-row { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border, #e5e7eb); }
 .rp-row-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
 .rp-row-actions { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+
+.rp-group { border: 1px solid var(--line); border-radius: 12px; padding: 4px 12px 2px; margin: 10px 0; }
+.rp-group-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.rp-group .rp-row:last-child { border-bottom: none; }
+.rp-row { align-items: center; }
+.rp-pills { gap: 6px; }
+.rp-pills .pill, .rp-filter-pills .pill { padding: 5px 12px; min-height: 30px; font-size: 12px; }
+.rp-filter-pills { margin: 8px 0; }
+.rp-filter-pills .pill.active { background: var(--amber-bg); color: var(--amber); border-color: var(--amber); }
+.pill.rp-pill[data-status="resent"].active { background: var(--blue-bg); color: var(--blue); border-color: var(--blue); }
+.rp-invno { color: var(--muted); }

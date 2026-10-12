@@ -135,7 +135,7 @@ async function loadMe() {
   usersBtn.hidden = !isOwner;
   activityLogBtn.hidden = !(isOwner || currentRole === "telecaller");
   trashBtn.hidden = !(isOwner || currentRole === "telecaller");
-  repurchaseBtn.hidden = !(isOwner || currentRole === "telecaller");
+  repurchaseBtn.hidden = false; // every role can open it; what they can do inside is role-limited
   cancelledBtn.hidden = !(isOwner || currentRole === "telecaller");
   // Accounts/Packer are locked to a single Billing-only view already — an
   // arrived/pending breakdown isn't meaningful there, so the Summary
@@ -1365,6 +1365,8 @@ const rpTitle = document.getElementById("rpTitle");
 const repurchaseListModal = document.getElementById("repurchaseListModal");
 const rpList = document.getElementById("rpList");
 const rpStatusFilter = document.getElementById("rpStatusFilter");
+let rpFilter = null; // set per role when the list opens
+const RP_LABELS = { pending: "Pending", purchased: "Purchased", resent: "Sent" };
 let rpOrderId = null;
 
 async function openRepurchasePicker(orderId) {
@@ -1384,15 +1386,18 @@ async function openRepurchasePicker(orderId) {
     rpItems.innerHTML = `<p class="empty-log">This order has no items.</p>`;
     return;
   }
-  rpItems.innerHTML = data.items.map((it) => `
+  rpItems.innerHTML = data.items.map((it) => {
+    const room = Math.max(0, it.quantity - (it.already_repurchased || 0));
+    return `
     <div class="rp-item" data-item-id="${escapeHtml(it.id)}">
       <label class="rp-item-main">
-        <input type="checkbox" class="rp-check" />
+        <input type="checkbox" class="rp-check" ${room ? "" : "disabled"} />
         <span>${escapeHtml(it.title || "Item")}${it.variant_title ? ` <small>(${escapeHtml(it.variant_title)})</small>` : ""}
           ${it.already_repurchased ? `<small class="rp-already">already in Repurchase ×${it.already_repurchased}</small>` : ""}</span>
       </label>
-      <span class="rp-qty">Qty <input type="number" class="rp-qty-input" min="1" max="${it.quantity}" value="${it.quantity}" /> of ${it.quantity}</span>
-    </div>`).join("");
+      <span class="rp-qty">Qty <input type="number" class="rp-qty-input" min="1" max="${room || 1}" value="${room || 1}" ${room ? "" : "disabled"} /> of ${it.quantity}</span>
+    </div>`;
+  }).join("");
 }
 
 document.getElementById("rpCancelBtn").addEventListener("click", () => { repurchaseModal.hidden = true; });
@@ -1418,58 +1423,141 @@ document.getElementById("rpSaveBtn").addEventListener("click", async () => {
   showMessage(`Added ${picked.length} item${picked.length > 1 ? "s" : ""} to Repurchase`);
 });
 
+function rpAllowedStatuses() {
+  // Which pills this role may click (server enforces the same rules).
+  if (currentRole === "owner" || currentRole === "telecaller") return ["pending", "purchased", "resent"];
+  if (currentRole === "staff") return ["pending", "purchased"];
+  if (currentRole === "packer") return ["purchased", "resent"];
+  return [];
+}
+
+function renderRpFilter() {
+  const tabs = currentRole === "packer" ? ["purchased", "resent"] : ["", "pending", "purchased", "resent"];
+  rpStatusFilter.innerHTML = "";
+  tabs.forEach((s) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "pill" + (rpFilter === s ? " active" : "");
+    b.dataset.status = s || "all";
+    b.textContent = s ? RP_LABELS[s] : "All";
+    b.addEventListener("click", () => { rpFilter = s; renderRpFilter(); loadRepurchases(); });
+    rpStatusFilter.appendChild(b);
+  });
+}
+
+async function printRepurchaseInvoice(batchKey, btn) {
+  const tab = window.open("", "_blank");
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Printing…";
+  try {
+    const res = await fetch(`/api/repurchases/batch/${encodeURIComponent(batchKey)}/invoice.pdf`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      if (tab) tab.close();
+      showMessage(data.error || "Could not generate the invoice.", true);
+      return;
+    }
+    const blobUrl = URL.createObjectURL(await res.blob());
+    if (tab) tab.location = blobUrl;
+    loadRepurchases();
+  } catch (err) {
+    if (tab) tab.close();
+    showMessage("Could not reach the server to print the invoice.", true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
 async function loadRepurchases() {
   rpList.innerHTML = `<p class="empty-log">Loading…</p>`;
-  const status = rpStatusFilter.value;
-  const res = await fetch(status ? `/api/repurchases?status=${encodeURIComponent(status)}` : "/api/repurchases");
+  const res = await fetch(rpFilter ? `/api/repurchases?status=${encodeURIComponent(rpFilter)}` : "/api/repurchases");
   if (!res.ok) {
     rpList.innerHTML = `<p class="empty-log">Could not load Repurchase list.</p>`;
     return;
   }
-  const rows = await res.json();
+  const { rows } = await res.json();
   if (!rows.length) {
     rpList.innerHTML = `<p class="empty-log">Nothing here yet.</p>`;
     return;
   }
-  rpList.innerHTML = rows.map((r) => `
-    <div class="rp-row" data-id="${r.id}">
-      <div class="rp-row-main">
-        <strong>${escapeHtml(r.title || "Item")}</strong>${r.variant_title ? ` <small>(${escapeHtml(r.variant_title)})</small>` : ""} × ${r.quantity}
-        <div class="rp-row-sub">${escapeHtml(r.order_name || "")} · ${escapeHtml(r.customer_name || "")}${r.customer_phone ? " · " + escapeHtml(r.customer_phone) : ""}</div>
-        ${r.reason ? `<div class="rp-row-sub">Reason: ${escapeHtml(r.reason)}</div>` : ""}
-        <div class="rp-row-sub">Added by ${escapeHtml(r.created_by || "")}${r.created_at ? " · " + escapeHtml(new Date(r.created_at).toLocaleString()) : ""}</div>
+  const canRemove = currentRole === "owner" || currentRole === "telecaller";
+  const canPrint = ["owner", "telecaller", "accounts", "staff"].includes(currentRole);
+  const allowed = rpAllowedStatuses();
+
+  // One block (and one RPR bill) per "Add to Repurchase" action.
+  const groups = [];
+  const byKey = {};
+  rows.forEach((r) => {
+    if (!byKey[r.batch_key]) { byKey[r.batch_key] = { key: r.batch_key, rows: [] }; groups.push(byKey[r.batch_key]); }
+    byKey[r.batch_key].rows.push(r);
+  });
+
+  rpList.innerHTML = groups.map((g) => {
+    const first = g.rows[0];
+    const invNo = (g.rows.find((r) => r.invoice_number) || {}).invoice_number;
+    const ready = g.rows.every((r) => r.status !== "pending");
+    const printBtn = canPrint
+      ? `<button type="button" class="btn btn-ghost btn-small rp-print" data-key="${escapeHtml(g.key)}" ${ready ? "" : "disabled title=\"Mark all items Purchased first\""}>${invNo ? "Reprint " + escapeHtml(invNo) : "Print invoice"}</button>`
+      : (invNo ? `<small class="rp-invno">${escapeHtml(invNo)}</small>` : "");
+    return `
+    <div class="rp-group" data-key="${escapeHtml(g.key)}">
+      <div class="rp-group-head">
+        <div><strong>${escapeHtml(first.order_name || "")}</strong> · ${escapeHtml(first.customer_name || "")}${first.customer_phone ? " · " + escapeHtml(first.customer_phone) : ""}
+          <div class="rp-row-sub">Added by ${escapeHtml(first.created_by || "")}${first.created_at ? " · " + escapeHtml(new Date(first.created_at).toLocaleString()) : ""}${first.reason ? " · Reason: " + escapeHtml(first.reason) : ""}</div></div>
+        ${printBtn}
       </div>
-      <div class="rp-row-actions">
-        <select class="rp-status-select">
-          ${["pending", "purchased", "resent"].map((s) => `<option value="${s}" ${r.status === s ? "selected" : ""}>${s[0].toUpperCase() + s.slice(1)}</option>`).join("")}
-        </select>
-        <button type="button" class="btn btn-ghost btn-small btn-danger rp-delete">Remove</button>
-      </div>
-    </div>`).join("");
+      ${g.rows.map((r) => `
+      <div class="rp-row" data-id="${r.id}" data-status="${escapeHtml(r.status)}">
+        <div class="rp-row-main">
+          <strong>${escapeHtml(r.title || "Item")}</strong>${r.variant_title ? ` <small>(${escapeHtml(r.variant_title)})</small>` : ""} × ${r.quantity}
+        </div>
+        <div class="rp-row-actions">
+          <div class="status-pills rp-pills">
+            ${["pending", "purchased", "resent"].map((s) => `<button type="button" class="pill rp-pill ${r.status === s ? "active" : ""} ${allowed.includes(s) ? "" : "pill-readonly"}" data-status="${s}" ${allowed.includes(s) ? "" : "disabled"}>${RP_LABELS[s]}</button>`).join("")}
+          </div>
+          ${canRemove ? `<button type="button" class="btn btn-ghost btn-small btn-danger rp-delete">Remove</button>` : ""}
+        </div>
+      </div>`).join("")}
+    </div>`;
+  }).join("");
+
   rpList.querySelectorAll(".rp-row").forEach((row) => {
     const id = row.dataset.id;
-    row.querySelector(".rp-status-select").addEventListener("change", async (e) => {
-      const res = await fetch(`/api/repurchases/${id}/status`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: e.target.value }),
+    row.querySelectorAll(".rp-pill:not([disabled])").forEach((pill) => {
+      pill.addEventListener("click", async () => {
+        if (pill.dataset.status === row.dataset.status) return;
+        const res = await fetch(`/api/repurchases/${id}/status`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: pill.dataset.status }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          showMessage(err.error || "Could not update status.", true);
+        }
+        loadRepurchases();
       });
-      if (!res.ok) { showMessage("Could not update status.", true); }
-      loadRepurchases();
     });
-    row.querySelector(".rp-delete").addEventListener("click", async () => {
+    const del = row.querySelector(".rp-delete");
+    if (del) del.addEventListener("click", async () => {
       if (!confirm("Remove this item from Repurchase?")) return;
       const res = await fetch(`/api/repurchases/${id}`, { method: "DELETE" });
       if (!res.ok) { showMessage("Could not remove.", true); return; }
       loadRepurchases();
     });
   });
+  rpList.querySelectorAll(".rp-print").forEach((btn) => {
+    btn.addEventListener("click", () => printRepurchaseInvoice(btn.dataset.key, btn));
+  });
 }
 
 repurchaseBtn.addEventListener("click", () => {
   repurchaseListModal.hidden = false;
+  rpFilter = currentRole === "packer" ? "purchased" : "pending";
+  renderRpFilter();
   loadRepurchases();
 });
-rpStatusFilter.addEventListener("change", loadRepurchases);
 document.getElementById("rpListCloseBtn").addEventListener("click", () => { repurchaseListModal.hidden = true; });
 
 // ---------------------------------------------------------------------------
@@ -1785,6 +1873,7 @@ const ACTIVITY_ACTION_LABELS = {
   repurchase_add: "Repurchase",
   repurchase_status: "Repurchase status",
   repurchase_delete: "Repurchase removed",
+  repurchase_invoice: "Repurchase invoice",
   sync: "Sync",
   manual_add: "Added (paste)",
   order_edit: "Order edited",
