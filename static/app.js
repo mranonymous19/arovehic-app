@@ -130,6 +130,7 @@ async function loadMe() {
 
   const isOwner = currentRole === "owner";
   syncBtn.hidden = !(isOwner || currentRole === "staff");
+  loadSyncHealth();
   pasteOrderBtn.hidden = !(isOwner || currentRole === "telecaller");
   settingsBtn.hidden = !isOwner;
   usersBtn.hidden = !isOwner;
@@ -1131,6 +1132,75 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+function fmtMs(ms) {
+  if (ms == null) return "--";
+  return ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : Math.round(ms) + "ms";
+}
+
+async function loadSyncHealth() {
+  const card = document.getElementById("syncHealthCard");
+  if (!card || !(currentRole === "owner" || currentRole === "staff")) return;
+  try {
+    const res = await fetch("/api/sync/health");
+    if (!res.ok) return;
+    const d = await res.json();
+    card.hidden = false;
+    document.getElementById("syncHealthLabel").textContent = "SYNC INTEGRITY";
+    document.getElementById("syncBar").hidden = true;
+    const pct = document.getElementById("syncHealthPct");
+    const sub = document.getElementById("syncHealthSub");
+    const dot = document.getElementById("syncHealthDot");
+    const status = document.getElementById("syncHealthStatus");
+    const avg = document.getElementById("syncHealthAvg");
+    if (!d.samples) {
+      pct.textContent = "--";
+      sub.textContent = "Run a sync to measure latency";
+      sub.className = "sync-health-sub";
+      status.textContent = "No data";
+      avg.textContent = "";
+      dot.className = "sync-dot";
+      return;
+    }
+    pct.textContent = d.integrity_pct + "%";
+    sub.textContent = "Webhook latency: " + fmtMs(d.last_ms);
+    sub.className = "sync-health-sub" + (!d.last_ok || d.last_ms > 3000 ? " bad" : d.last_ms > 1000 ? " warn" : "");
+    status.textContent = d.status;
+    avg.textContent = d.avg_ms != null ? "avg " + fmtMs(d.avg_ms) + " · " + d.samples + " syncs" : d.samples + " syncs";
+    dot.className = "sync-dot " + (d.last_ok ? "ok" : "bad");
+  } catch (e) { /* card is non-critical */ }
+}
+
+function renderSyncProgress(p) {
+  const card = document.getElementById("syncHealthCard");
+  card.hidden = false;
+  document.getElementById("syncHealthLabel").textContent = "SYNCING";
+  document.getElementById("syncHealthPct").textContent = (p.percent || 0) + "%";
+  const sub = document.getElementById("syncHealthSub");
+  sub.className = "sync-health-sub";
+  sub.textContent = p.phase === "saving"
+    ? `Saving orders ${p.done || 0}/${p.total || 0}`
+    : "Fetching from Shopify…";
+  document.getElementById("syncHealthStatus").textContent = "Syncing";
+  document.getElementById("syncHealthAvg").textContent = "";
+  document.getElementById("syncHealthDot").className = "sync-dot ok";
+  document.getElementById("syncBar").hidden = false;
+  document.getElementById("syncBarFill").style.width = (p.percent || 0) + "%";
+}
+
+async function pollSyncProgress(runId) {
+  const deadline = Date.now() + 15 * 60 * 1000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 600));
+    const res = await fetch("/api/sync/progress");
+    if (!res.ok) continue;
+    const p = await res.json();
+    if (p.id !== runId) continue;
+    renderSyncProgress(p);
+    if (p.state !== "running") return p;
+  }
+  return { state: "error", message: "Sync is taking too long — check n8n." };
+}
+
 syncBtn.addEventListener("click", async () => {
   syncBtn.disabled = true;
   syncBtn.textContent = "Syncing…";
@@ -1139,13 +1209,22 @@ syncBtn.addEventListener("click", async () => {
     const data = await res.json();
     if (!res.ok) {
       showMessage(data.error || "Sync failed.", true);
-    } else {
-      showMessage(`Synced ${data.orders_synced} orders, ${data.items_synced} items.`);
+      return;
+    }
+    renderSyncProgress({ percent: 0, phase: "fetching" });
+    const final = await pollSyncProgress(data.id);
+    if (final.state === "done") {
+      renderSyncProgress({ ...final, percent: 100 });
+      showMessage(`Synced ${final.orders_synced} orders, ${final.items_synced} items.`);
       loadOrders();
+      await new Promise((r) => setTimeout(r, 900));
+    } else {
+      showMessage(final.message || "Sync failed.", true);
     }
   } catch (err) {
     showMessage("Sync failed: " + err.message, true);
   } finally {
+    loadSyncHealth();
     syncBtn.disabled = false;
     syncBtn.textContent = "Sync from Shopify";
   }
@@ -1951,12 +2030,70 @@ async function loadActivityLog() {
 // Init
 // ---------------------------------------------------------------------------
 
+// Live loading progress (0-100%) for the first page load.
+//  0-60%  waiting for the server/database (estimated from the last load time)
+// 60-95%  downloading the orders (real bytes received)
+// 95-100% rendering
+function showOrdersLoading() {
+  ordersContainer.innerHTML =
+    '<div class="empty-state"><div class="glyph">Loading orders… <span id="loadPct">0%</span></div>' +
+    '<div class="load-bar"><div class="load-bar-fill" id="loadBarFill"></div></div></div>';
+}
+
+function setOrdersProgress(pct) {
+  pct = Math.max(0, Math.min(100, Math.round(pct)));
+  const t = document.getElementById("loadPct");
+  const f = document.getElementById("loadBarFill");
+  if (t) t.textContent = pct + "%";
+  if (f) f.style.width = pct + "%";
+}
+
+async function fetchOrdersWithProgress() {
+  let expected = 3000;
+  try { expected = Number(localStorage.getItem("ordersLoadMs")) || 3000; } catch (e) {}
+  const t0 = performance.now();
+  let gotHeaders = false;
+  const timer = setInterval(() => {
+    if (gotHeaders) return;
+    const elapsed = performance.now() - t0;
+    setOrdersProgress(Math.min(58, 60 * (1 - Math.exp(-1.6 * elapsed / expected))));
+  }, 100);
+  try {
+    const res = await fetch("/api/orders");
+    gotHeaders = true;
+    const total = Number(res.headers.get("X-Raw-Length")) || 0;
+    let data;
+    if (res.body && total) {
+      const reader = res.body.getReader();
+      const chunks = [];
+      let received = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        setOrdersProgress(60 + 35 * Math.min(1, received / total));
+      }
+      const buf = new Uint8Array(received);
+      let off = 0;
+      for (const c of chunks) { buf.set(c, off); off += c.length; }
+      data = JSON.parse(new TextDecoder().decode(buf));
+    } else {
+      setOrdersProgress(80);
+      data = await res.json();
+    }
+    setOrdersProgress(96);
+    try { localStorage.setItem("ordersLoadMs", String(Math.round(performance.now() - t0))); } catch (e) {}
+    return data;
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 (async function init() {
-  // Show a loading state immediately and fetch user + orders in parallel
-  // (they don't depend on each other on the network side), instead of
-  // waiting for /api/me to finish before even asking for orders.
-  ordersContainer.innerHTML = '<div class="empty-state"><div class="glyph">Loading orders…</div></div>';
-  const ordersFetch = fetch("/api/orders").then((r) => r.json()).catch(() => null);
+  // Show a loading state immediately and fetch user + orders in parallel.
+  showOrdersLoading();
+  const ordersFetch = fetchOrdersWithProgress().catch(() => null);
   await loadMe();
   const orders = await ordersFetch;
   if (Array.isArray(orders) && !currentFilter && !currentPaymentFilter && !currentDateFrom && !currentDateTo) {

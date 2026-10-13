@@ -135,3 +135,20 @@ main#ordersContainer{padding:6px 28px 48px}
   input,select,textarea{font-size:16px}
 }
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* Sync integrity card */
+.sync-health{display:flex;align-items:center;justify-content:space-between;gap:18px;max-width:420px;margin:12px 0;padding:16px 20px;border-radius:14px;background:#0f1b2d;color:#e8eef7;box-shadow:var(--shadow)}
+.sync-health[hidden]{display:none}
+.sync-health-label{font-size:11px;font-weight:600;letter-spacing:.12em;color:#c9a27e;display:flex;align-items:center;gap:8px}
+.sync-dot{width:8px;height:8px;border-radius:50%;background:#6b7a90}
+.sync-dot.ok{background:#6ec1ff;box-shadow:0 0 8px #6ec1ff}.sync-dot.bad{background:#ff6b6b;box-shadow:0 0 8px #ff6b6b}
+.sync-health-pct{font-size:38px;font-weight:700;line-height:1.1;margin:4px 0 2px;color:#cfe0ff}
+.sync-health-sub{font-size:13px;color:#e39a62}
+.sync-health-sub.warn{color:#f5c04a}.sync-health-sub.bad{color:#ff8a8a}
+.sync-health-side{padding:10px 14px;border-radius:8px;background:#16263c;font-size:14px;font-weight:600;color:#e39a62;min-width:92px}
+.sync-health-avg{font-size:11px;font-weight:400;color:#8fa3bd;margin-top:4px}
+.sync-bar{height:6px;border-radius:6px;background:#1d3050;margin-top:10px;overflow:hidden;width:220px;max-width:100%}
+.sync-bar[hidden]{display:none}
+.sync-bar-fill{height:100%;width:0;background:linear-gradient(90deg,#6ec1ff,#cfe0ff);border-radius:6px;transition:width .5s ease}
+.load-bar{height:8px;width:min(320px,70%);margin:14px auto 0;border-radius:8px;background:#e1e6ed;overflow:hidden}
+.load-bar-fill{height:100%;width:0;border-radius:8px;background:linear-gradient(90deg,#f0771f,#f5a05a);transition:width .25s ease}

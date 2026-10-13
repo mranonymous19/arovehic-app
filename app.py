@@ -25,6 +25,19 @@ VALID_STATUSES = {"pending", "purchased", "stock", "na", "refunded", "wait"}
 VALID_ROLES = {"owner", "staff", "telecaller", "packer", "accounts"}
 
 app = Flask(__name__)
+
+
+@app.errorhandler(Exception)
+def _api_json_errors(exc):
+    """Return API crashes as JSON (with the real message) instead of an HTML
+    500 page, so the UI banner can show what actually went wrong."""
+    from werkzeug.exceptions import HTTPException
+    if request.path.startswith("/api/"):
+        app.logger.exception("API error on %s", request.path)
+        if isinstance(exc, HTTPException):
+            return jsonify({"error": exc.description}), exc.code
+        return jsonify({"error": f"Server error: {type(exc).__name__}: {exc}"}), 500
+    raise exc
 # Needed for signed session cookies (login). Set a real SECRET_KEY env var
 # in production (Render) — this fallback is only for local dev.
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
@@ -732,12 +745,88 @@ def api_save_schedule_settings():
 # Routes - sync from n8n (n8n talks to Shopify, this app talks to n8n)
 # ---------------------------------------------------------------------------
 
-@app.route("/api/sync", methods=["POST"])
+SYNC_HISTORY_MAX = 30
+
+
+def record_sync_event(ok, latency_ms, attempts):
+    """Keep the last N sync attempts (success, webhook latency) in settings."""
+    import json
+    try:
+        history = json.loads(get_setting("sync_history", "[]") or "[]")
+    except ValueError:
+        history = []
+    history.append({
+        "t": datetime.now(timezone.utc).isoformat(),
+        "ok": bool(ok),
+        "ms": int(latency_ms) if latency_ms is not None else None,
+        "tries": attempts,
+    })
+    set_setting("sync_history", json.dumps(history[-SYNC_HISTORY_MAX:]))
+
+
+@app.route("/api/sync/health")
 @staff_or_owner_required
-def api_sync():
-    webhook_url = get_setting("n8n_webhook_url")
-    if not webhook_url:
-        return jsonify({"error": "No n8n webhook URL configured. Set it in Settings first."}), 400
+def api_sync_health():
+    import json
+    try:
+        history = json.loads(get_setting("sync_history", "[]") or "[]")
+    except ValueError:
+        history = []
+    if not history:
+        return jsonify({"samples": 0, "status": "No data"})
+    ok_runs = [h for h in history if h.get("ok") and h.get("ms") is not None]
+    last = history[-1]
+    avg_ms = round(sum(h["ms"] for h in ok_runs) / len(ok_runs)) if ok_runs else None
+    integrity = round(100 * sum(1 for h in history if h.get("ok")) / len(history))
+    return jsonify({
+        "samples": len(history),
+        "integrity_pct": integrity,
+        "last_ok": last.get("ok"),
+        "last_ms": last.get("ms"),
+        "avg_ms": avg_ms,
+        "last_at": last.get("t"),
+        "status": "Live" if last.get("ok") else "Down",
+    })
+
+
+SYNC_PROGRESS_KEY = "sync_progress"
+
+
+def _write_progress(state):
+    """Best-effort progress write on its OWN connection, so it never commits
+    the sync's own transaction midway."""
+    import json
+    pool = get_pool()
+    conn = pool.getconn()
+    broken = False
+    try:
+        with conn.cursor() as c:
+            c.execute(
+                "INSERT INTO settings (key, value) VALUES (%s, %s) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                (SYNC_PROGRESS_KEY, json.dumps(state)),
+            )
+        conn.commit()
+    except Exception:
+        broken = True
+    finally:
+        pool.putconn(conn, close=broken)
+
+
+def _read_progress():
+    import json
+    cur = get_db().cursor()
+    cur.execute("SELECT value FROM settings WHERE key = %s", (SYNC_PROGRESS_KEY,))
+    row = cur.fetchone()
+    cur.close()
+    try:
+        return json.loads(row["value"]) if row and row["value"] else None
+    except ValueError:
+        return None
+
+
+def _do_sync(webhook_url, user_name, state):
+    """Runs inside a background thread (app context). Returns (dict, status)."""
 
     # The first call to the n8n webhook after some idle time has reliably
     # failed here (both connection errors and an HTML error page instead of
@@ -747,16 +836,21 @@ def api_sync():
     # before giving up.
     last_error = None
     payload = None
+    latency_ms = None
+    attempts_used = 0
     delays = [0, 3, 6]
     for attempt, delay in enumerate(delays):
+        attempts_used = attempt + 1
         if delay:
             time.sleep(delay)
+        t0 = time.perf_counter()
         try:
             resp = requests.get(webhook_url, timeout=180)
             resp.raise_for_status()
         except requests.exceptions.RequestException as exc:
             last_error = f"Could not reach n8n webhook: {exc}"
             continue
+        latency_ms = (time.perf_counter() - t0) * 1000
 
         try:
             payload = resp.json()
@@ -777,12 +871,17 @@ def api_sync():
             )
 
     if last_error is not None:
-        return jsonify({"error": last_error}), 502
+        record_sync_event(False, None, attempts_used)
+        return {"error": last_error}, 502
+    record_sync_event(True, latency_ms, attempts_used)
 
     # Expected payload shape (see README): a list of orders, each with a
     # list of line items. Adjust here if your n8n Code node outputs
     # differently.
     orders = payload if isinstance(payload, list) else payload.get("orders", [])
+
+    state.update(phase="saving", total=len(orders), done=0)
+    _write_progress(state)
 
     db = get_db()
     cur = db.cursor()
@@ -790,7 +889,10 @@ def api_sync():
     order_count = 0
     item_count = 0
 
-    for order in orders:
+    for idx, order in enumerate(orders):
+        if idx and idx % 3 == 0:
+            state["done"] = idx
+            _write_progress(state)
         order_id = str(order.get("id") or order.get("order_id") or "").strip()
         if not order_id:
             continue
@@ -888,10 +990,75 @@ def api_sync():
                 )
             item_count += 1
 
-    log_activity(cur, None, "sync", "sync", f"{session['name']} synced {order_count} orders / {item_count} items from Shopify")
+    log_activity(cur, None, "sync", "sync", f"{user_name} synced {order_count} orders / {item_count} items from Shopify")
     db.commit()
     cur.close()
-    return jsonify({"ok": True, "orders_synced": order_count, "items_synced": item_count})
+    return {"ok": True, "orders_synced": order_count, "items_synced": item_count}, 200
+
+
+def _run_sync_job(state, webhook_url, user_name):
+    import threading  # noqa: F401
+    with app.app_context():
+        try:
+            result, status = _do_sync(webhook_url, user_name, state)
+        except Exception as exc:  # never leave the UI stuck on "running"
+            result, status = {"error": f"Sync crashed: {type(exc).__name__}: {exc}"}, 500
+        if status == 200:
+            state.update(state="done", phase="done", orders_synced=result["orders_synced"],
+                         items_synced=result["items_synced"], done=state.get("total", 0))
+        else:
+            state.update(state="error", message=result.get("error", "Sync failed."))
+        state["finished"] = time.time()
+        _write_progress(state)
+
+
+@app.route("/api/sync", methods=["POST"])
+@staff_or_owner_required
+def api_sync():
+    import json
+    import threading
+    webhook_url = get_setting("n8n_webhook_url")
+    if not webhook_url:
+        return jsonify({"error": "No n8n webhook URL configured. Set it in Settings first."}), 400
+
+    current = _read_progress()
+    if current and current.get("state") == "running" and time.time() - current.get("started", 0) < 720:
+        return jsonify({"error": "A sync is already running."}), 409
+
+    try:
+        history = json.loads(get_setting("sync_history", "[]") or "[]")
+    except ValueError:
+        history = []
+    times = [h["ms"] for h in history if h.get("ok") and h.get("ms")]
+    expected_ms = max(2000, sum(times) / len(times)) if times else 8000
+
+    state = {"id": uuid.uuid4().hex, "state": "running", "phase": "fetching",
+             "started": time.time(), "expected_ms": expected_ms, "done": 0, "total": 0}
+    _write_progress(state)
+    threading.Thread(target=_run_sync_job, args=(state, webhook_url, session["name"]), daemon=True).start()
+    return jsonify({"ok": True, "id": state["id"]}), 202
+
+
+@app.route("/api/sync/progress")
+@staff_or_owner_required
+def api_sync_progress():
+    st = _read_progress()
+    if not st:
+        return jsonify({"state": "idle", "percent": 0})
+    now = time.time()
+    if st.get("state") == "running" and now - st.get("started", now) > 720:
+        st.update(state="error", message="Sync was interrupted (server restarted?). Try again.")
+    if st.get("state") == "running":
+        if st.get("phase") == "fetching":
+            elapsed = (now - st["started"]) * 1000
+            percent = int(min(38, 38 * elapsed / max(st.get("expected_ms", 8000), 1)))
+        else:
+            percent = min(99, 40 + int(60 * st.get("done", 0) / max(st.get("total", 1), 1)))
+    elif st.get("state") == "done":
+        percent = 100
+    else:
+        percent = 0
+    return jsonify({**st, "percent": percent})
 
 
 @app.route("/api/orders/manual", methods=["POST"])
@@ -1307,7 +1474,11 @@ def api_orders():
         )
 
     cur.close()
-    return jsonify(result)
+    resp = jsonify(result)
+    # Uncompressed size, so the browser can show a real download progress even
+    # when a proxy (Caddy) gzips the response and hides Content-Length.
+    resp.headers["X-Raw-Length"] = str(len(resp.get_data()))
+    return resp
 
 
 @app.route("/api/orders/summary", methods=["GET"])

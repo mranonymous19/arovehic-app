@@ -38,6 +38,19 @@
 
   <div id="syncMsg" class="banner" hidden></div>
 
+  <div id="syncHealthCard" class="sync-health" hidden>
+    <div class="sync-health-main">
+      <div class="sync-health-label"><span id="syncHealthLabel">SYNC INTEGRITY</span> <span id="syncHealthDot" class="sync-dot"></span></div>
+      <div class="sync-health-pct" id="syncHealthPct">--</div>
+      <div class="sync-health-sub" id="syncHealthSub">No syncs yet</div>
+      <div class="sync-bar" id="syncBar" hidden><div class="sync-bar-fill" id="syncBarFill"></div></div>
+    </div>
+    <div class="sync-health-side">
+      <div id="syncHealthStatus">--</div>
+      <div id="syncHealthAvg" class="sync-health-avg"></div>
+    </div>
+  </div>
+
   <div class="filters">
     <input id="orderTrackInput" type="search" placeholder="Track an order — name, customer, or Order ID" class="order-track-input">
     <label class="date-filter-label" for="statusFilterSelect">Status</label>
