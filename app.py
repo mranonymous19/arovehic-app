@@ -296,14 +296,14 @@ def set_setting(key, value):
     g.pop("_settings_cache", None)
 
 
-def log_activity(cur, item_id, item_name, action, details="", order_id=None):
+def log_activity(cur, item_id, item_name, action, details="", order_id=None, user_name=None):
     """Record one activity log entry using the already-open cursor `cur`,
     so it lands in the same transaction as whatever it's logging — does
     NOT call db.commit() itself, the caller's existing commit covers it."""
     cur.execute(
         "INSERT INTO activity_log (item_id, item_name, order_id, user_name, action, details, created_at) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-        (item_id, item_name, order_id, session.get("name", "unknown"), action, details,
+        (item_id, item_name, order_id, user_name or session.get("name", "unknown"), action, details,
          datetime.now(timezone.utc).isoformat()),
     )
 
@@ -990,7 +990,7 @@ def _do_sync(webhook_url, user_name, progress):
                 )
             item_count += 1
 
-    log_activity(cur, None, "sync", "sync", f"{user_name} synced {order_count} orders / {item_count} items from Shopify")
+    log_activity(cur, None, "sync", "sync", f"{user_name} synced {order_count} orders / {item_count} items from Shopify", user_name=user_name)
     db.commit()
     cur.close()
     return {"ok": True, "orders_synced": order_count, "items_synced": item_count}, 200
