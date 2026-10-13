@@ -1089,7 +1089,7 @@ async function updateBillCancelled(orderId, cancelled, reason) {
 }
 
 async function updatePurchaseAmount(itemId, value, inputEl) {
-  const res = await fetch(`/api/items/${itemId}/purchase-amount`, {
+  const res = await fetch(`/api/items/${encodeURIComponent(itemId)}/purchase-amount`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ purchase_amount: value || 0 }),
@@ -1103,13 +1103,14 @@ async function updatePurchaseAmount(itemId, value, inputEl) {
 }
 
 async function updateStatus(itemId, status, rowEl) {
-  const res = await fetch(`/api/items/${itemId}/status`, {
+  const res = await fetch(`/api/items/${encodeURIComponent(itemId)}/status`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status }),
   });
   if (!res.ok) {
-    showMessage("Could not update status.", true);
+    const err = await res.json().catch(() => ({}));
+    showMessage(`${err.error || "Could not update status."} (HTTP ${res.status})`, true);
     return;
   }
   rowEl.querySelectorAll(".pill").forEach((p) => {
