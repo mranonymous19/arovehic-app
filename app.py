@@ -825,7 +825,7 @@ def _read_progress():
         return None
 
 
-def _do_sync(webhook_url, user_name, state):
+def _do_sync(webhook_url, user_name, progress):
     """Runs inside a background thread (app context). Returns (dict, status)."""
 
     # The first call to the n8n webhook after some idle time has reliably
@@ -880,8 +880,8 @@ def _do_sync(webhook_url, user_name, state):
     # differently.
     orders = payload if isinstance(payload, list) else payload.get("orders", [])
 
-    state.update(phase="saving", total=len(orders), done=0)
-    _write_progress(state)
+    progress.update(phase="saving", total=len(orders), done=0)
+    _write_progress(progress)
 
     db = get_db()
     cur = db.cursor()
@@ -891,8 +891,8 @@ def _do_sync(webhook_url, user_name, state):
 
     for idx, order in enumerate(orders):
         if idx and idx % 3 == 0:
-            state["done"] = idx
-            _write_progress(state)
+            progress["done"] = idx
+            _write_progress(progress)
         order_id = str(order.get("id") or order.get("order_id") or "").strip()
         if not order_id:
             continue
