@@ -209,6 +209,7 @@ def init_db():
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_amount NUMERIC;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS balance_due NUMERIC;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS amount_to_receive NUMERIC;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_total NUMERIC;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_type TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS deleted_at TEXT;
         CREATE INDEX IF NOT EXISTS idx_orders_deleted_at ON orders (deleted_at);
@@ -1816,19 +1817,25 @@ def api_order_invoice(order_id):
     # the moment it's locked in for the invoice — same reasoning as the
     # invoice number itself being locked in on first print. COD orders get
     # the real figure; everything else (already paid) stores nothing.
+    # Invoice total (purchased/in-stock items + shipping) — the same grand
+    # total printed on the PDF. Saved for EVERY order, COD and prepaid, on
+    # every print/reprint, so it always matches the latest printed invoice.
+    total_incl_all = sum(float(i["price"] or 0) * (i["quantity"] or 0) for i in billing_items)
+    final_invoice_total = round(total_incl_all + float(order_dict.get("shipping_amount") or 0), 2)
+
+    final_amount_to_receive = None
     if order_dict.get("payment_type") == "cod":
         if order_dict.get("balance_due") is not None:
             final_amount_to_receive = float(order_dict["balance_due"])
         else:
-            total_incl = sum(float(i["price"] or 0) * (i["quantity"] or 0) for i in billing_items)
-            final_amount_to_receive = round(total_incl + float(order_dict.get("shipping_amount") or 0), 2)
-        save_cur = db.cursor()
-        save_cur.execute(
-            "UPDATE orders SET amount_to_receive = %s WHERE shopify_order_id = %s",
-            (final_amount_to_receive, order_id),
-        )
-        db.commit()
-        save_cur.close()
+            final_amount_to_receive = final_invoice_total
+    save_cur = db.cursor()
+    save_cur.execute(
+        "UPDATE orders SET invoice_total = %s, amount_to_receive = %s WHERE shopify_order_id = %s",
+        (final_invoice_total, final_amount_to_receive, order_id),
+    )
+    db.commit()
+    save_cur.close()
 
     pdf_buf = build_invoice_pdf(order_dict, [dict(i) for i in billing_items], invoice_number, invoice_date)
     filename = invoice_number.replace("/", "-") + ".pdf"
