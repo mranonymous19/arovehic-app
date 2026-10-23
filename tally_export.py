@@ -9,7 +9,7 @@ Amount-only sales vouchers (no stock items). Each invoice becomes:
     Dr  <customer ledger>          grand total
     Cr  Sales                      taxable value
     Cr  Output IGST 18%            IGST
-    Cr  Delivery Charges           delivery (if any)
+    Cr  Delivery Charges           delivery (if any; ledger under Direct Incomes)
     +/- Round Off                  only if the paise don't add up
 
 For an intra-state sale (customer in TALLY_HOME_STATE) the 18% is booked as
@@ -40,8 +40,9 @@ VOUCHER_TYPE = os.environ.get("TALLY_VOUCHER_TYPE", "Sales")
 DEFAULT_COMPANY = os.environ.get("TALLY_COMPANY_NAME", "")
 UOM = os.environ.get("TALLY_UOM", "nos")  # unit of measure shown against each item's qty/rate
 # Your own state. When the customer is in this state the sale is intra-state, so
-# the tax splits into CGST + SGST. Leave blank to always charge IGST.
-HOME_STATE = os.environ.get("TALLY_HOME_STATE", "")
+# the tax splits into CGST 9% + SGST 9%; any other state gets IGST 18%.
+# Defaults to Karnataka. Set TALLY_HOME_STATE to override (blank = always IGST).
+HOME_STATE = os.environ.get("TALLY_HOME_STATE", "Karnataka")
 HSN_CODE = os.environ.get("TALLY_HSN_CODE", "")  # optional; printed on the invoice
 
 # Tally's internal markers. The \x04 prefix is how Tally stores its own built-in
@@ -238,13 +239,13 @@ def _stock_item_master(name, unit, since):
         f"<GSTRATE>{value:g}</GSTRATE>"
         "</RATEDETAILS.LIST>"
         for head, value in (
-            ("CGST", half), ("SGST/UTGST", half), ("IGST", pct), ("Cess", 0),
+            ("Central Tax", half), ("State Tax", half), ("Integrated Tax", pct), ("Cess", 0),
         )
     )
     hsn = f"<HSNCODE>{x(HSN_CODE)}</HSNCODE>" if HSN_CODE else ""
     return (
         '<TALLYMESSAGE xmlns:UDF="TallyUDF">'
-        f'<STOCKITEM NAME="{x(name)}" ACTION="Create">'
+        f'<STOCKITEM NAME="{x(name)}">'
         f"<NAME.LIST><NAME>{x(name)}</NAME></NAME.LIST>"
         f"<BASEUNITS>{x(unit)}</BASEUNITS>"
         f"<GSTAPPLICABLE>{x(TALLY_APPLICABLE)}</GSTAPPLICABLE>"
@@ -398,7 +399,8 @@ def build_tally_xml(records, company=""):
             name,
             "Duties & Taxes",
             f"<TAXTYPE>GST</TAXTYPE><GSTDUTYHEAD>{duty_head}</GSTDUTYHEAD>"
-            f"<RATEOFTAXCALCULATION>{rate:g}</RATEOFTAXCALCULATION>",
+            f"<RATEOFTAXCALCULATION>{rate:g}</RATEOFTAXCALCULATION>"
+            "<ROUNDTYPE>Not Applicable</ROUNDTYPE>",
         )
 
     masters = [
@@ -411,7 +413,16 @@ def build_tally_xml(records, company=""):
         masters.append(tax_ledger(CGST_LEDGER, "Central Tax", GST_RATE * 50))
         masters.append(tax_ledger(SGST_LEDGER, "State Tax", GST_RATE * 50))
     if any(r["delivery"] for r in records):
-        masters.append(_ledger_master(DELIVERY_LEDGER, "Sales Accounts"))
+        masters.append(
+            _ledger_master(
+                DELIVERY_LEDGER,
+                "Direct Incomes",
+                "<LEDMAILINGDETAILS.LIST>"
+                f"<APPLICABLEFROM>{since}</APPLICABLEFROM>"
+                f"<MAILINGNAME>{x(DELIVERY_LEDGER)}</MAILINGNAME>"
+                "</LEDMAILINGDETAILS.LIST>",
+            )
+        )
     if any(r["round_off"] for r in records):
         masters.append(_ledger_master(ROUNDOFF_LEDGER, "Indirect Expenses"))
 
