@@ -38,7 +38,7 @@ DELIVERY_LEDGER = os.environ.get("TALLY_DELIVERY_LEDGER", "Delivery Charges")
 ROUNDOFF_LEDGER = os.environ.get("TALLY_ROUNDOFF_LEDGER", "Round Off")
 VOUCHER_TYPE = os.environ.get("TALLY_VOUCHER_TYPE", "Sales")
 DEFAULT_COMPANY = os.environ.get("TALLY_COMPANY_NAME", "")
-UOM = os.environ.get("TALLY_UOM", "nos")  # unit of measure shown against each item's qty/rate
+UOM = os.environ.get("TALLY_UOM", "Nos")  # unit of measure shown against each item's qty/rate
 # Your own state. When the customer is in this state the sale is intra-state, so
 # the tax splits into CGST 9% + SGST 9%; any other state gets IGST 18%.
 # Defaults to Karnataka. Set TALLY_HOME_STATE to override (blank = always IGST).
@@ -410,8 +410,7 @@ def build_tally_xml(records, company=""):
             name,
             "Duties & Taxes",
             f"<TAXTYPE>GST</TAXTYPE><GSTDUTYHEAD>{duty_head}</GSTDUTYHEAD>"
-            f"<RATEOFTAXCALCULATION>{rate:g}</RATEOFTAXCALCULATION>"
-            "<ROUNDTYPE>Not Applicable</ROUNDTYPE>",
+            f"<RATEOFTAXCALCULATION>{rate:g}</RATEOFTAXCALCULATION>",
         )
 
     masters = [
@@ -419,10 +418,10 @@ def build_tally_xml(records, company=""):
         _ledger_master(SALES_LEDGER, "Sales Accounts"),
     ]
     if any(not r["is_intrastate"] for r in records):
-        masters.append(tax_ledger(IGST_LEDGER, "Integrated Tax", GST_RATE * 100))
+        masters.append(tax_ledger(IGST_LEDGER, "IGST", GST_RATE * 100))
     if any(r["is_intrastate"] for r in records):
-        masters.append(tax_ledger(CGST_LEDGER, "Central Tax", GST_RATE * 50))
-        masters.append(tax_ledger(SGST_LEDGER, "State Tax", GST_RATE * 50))
+        masters.append(tax_ledger(CGST_LEDGER, "CGST", GST_RATE * 50))
+        masters.append(tax_ledger(SGST_LEDGER, "SGST/UTGST", GST_RATE * 50))
     if any(r["delivery"] for r in records):
         masters.append(
             _ledger_master(
