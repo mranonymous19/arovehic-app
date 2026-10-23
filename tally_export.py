@@ -255,6 +255,13 @@ def _stock_item_master(name, unit, since):
         f"{hsn}"
         "<CALCULATIONTYPE>On Value</CALCULATIONTYPE>"
         "<TAXABILITY>Taxable</TAXABILITY>"
+        # "Source of details" -> "Specify Details Here". Without this Tally
+        # shows "As per Company/Stock Group / Not Available" and 0%.
+        "<SRCOFGSTDETAILS>Specify Details Here</SRCOFGSTDETAILS>"
+        "<ISREVERSECHARGEAPPLICABLE>No</ISREVERSECHARGEAPPLICABLE>"
+        "<ISNONGSTGOODS>No</ISNONGSTGOODS>"
+        "<GSTINELIGIBLEITC>No</GSTINELIGIBLEITC>"
+        "<INCLUDEEXPFORSLABCALC>No</INCLUDEEXPFORSLABCALC>"
         "<STATEWISEDETAILS.LIST>"
         f"<STATENAME>{x(TALLY_ANY)}</STATENAME>"
         f"{rates}"
