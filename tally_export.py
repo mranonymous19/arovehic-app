@@ -234,6 +234,8 @@ def _stock_item_master(name, unit, since):
     """Stock item carrying its GST rate, so the invoice never prints 0%."""
     pct = GST_RATE * 100
     half = pct / 2
+    # Duty-head names here are the ones Tally itself writes in a stock item's
+    # rate list (confirmed from a Tally Prime export): CGST, SGST/UTGST, IGST.
     rates = "".join(
         "<RATEDETAILS.LIST>"
         f"<GSTRATEDUTYHEAD>{head}</GSTRATEDUTYHEAD>"
@@ -241,7 +243,7 @@ def _stock_item_master(name, unit, since):
         f"<GSTRATE>{value:g}</GSTRATE>"
         "</RATEDETAILS.LIST>"
         for head, value in (
-            ("Central Tax", half), ("State Tax", half), ("Integrated Tax", pct), ("Cess", 0),
+            ("CGST", half), ("SGST/UTGST", half), ("IGST", pct), ("Cess", 0),
         )
     )
     hsn = f"<HSNCODE>{x(HSN_CODE)}</HSNCODE>" if HSN_CODE else ""
