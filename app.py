@@ -1297,6 +1297,13 @@ def api_orders():
         query += " AND NULLIF(created_at, '')::date <= %s::date"
         params.append(date_to)
     query += " ORDER BY created_at DESC"
+    _limit_n = request.args.get("limit", type=int)
+    if _limit_n and _limit_n > 0:
+        _limit_n = min(_limit_n, 1000)
+        query += " LIMIT %s"
+        params.append(_limit_n)
+    else:
+        _limit_n = None
     cur.execute(query, params)
     orders = cur.fetchall()
 
@@ -1479,6 +1486,7 @@ def api_orders():
     # Uncompressed size, so the browser can show a real download progress even
     # when a proxy (Caddy) gzips the response and hides Content-Length.
     resp.headers["X-Raw-Length"] = str(len(resp.get_data()))
+    resp.headers["X-Truncated"] = "1" if (_limit_n and len(orders) >= _limit_n) else "0"
     return resp
 
 

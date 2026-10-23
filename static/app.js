@@ -200,7 +200,10 @@ function canTogglePacked() {
 // Orders
 // ---------------------------------------------------------------------------
 
-async function loadOrders() {
+let loadOrdersSeq = 0;
+const FIRST_PAGE = 100;
+
+async function fetchOrders(extra) {
   const params = new URLSearchParams();
   if (currentFilter) params.set("status", currentFilter);
   if (currentPaymentFilter) params.set("payment", currentPaymentFilter);
@@ -208,11 +211,25 @@ async function loadOrders() {
   if (currentDateTo) params.set("date_to", currentDateTo);
   if (currentFilter === "billing" && currentInvoiceFilter) params.set("invoice", currentInvoiceFilter);
   if (currentFilter === "billing" && currentTallyFilter) params.set("tally", currentTallyFilter);
-  const url = params.toString() ? `/api/orders?${params.toString()}` : "/api/orders";
-  const res = await fetch(url);
-  const orders = await res.json();
-  lastLoadedOrders = orders;
-  renderOrders(filterByTrackQuery(orders));
+  for (const [k, v] of Object.entries(extra || {})) params.set(k, v);
+  const qs = params.toString();
+  const res = await fetch(qs ? `/api/orders?${qs}` : "/api/orders");
+  const data = await res.json();
+  return { data, truncated: res.headers.get("X-Truncated") === "1" };
+}
+
+async function loadOrders() {
+  const seq = ++loadOrdersSeq;
+  const first = await fetchOrders({ limit: FIRST_PAGE });
+  if (seq !== loadOrdersSeq) return;
+  lastLoadedOrders = first.data;
+  renderOrders(filterByTrackQuery(first.data));
+  if (!first.truncated) return;
+  fetchOrders().then((all) => {
+    if (seq !== loadOrdersSeq) return;
+    lastLoadedOrders = all.data;
+    renderOrders(filterByTrackQuery(all.data));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -2091,15 +2108,32 @@ async function fetchOrdersWithProgress() {
 }
 
 (async function init() {
-  // Show a loading state immediately and fetch user + orders in parallel.
+  // Show a loading state immediately; fetch user + the newest orders in parallel.
   showOrdersLoading();
-  const ordersFetch = fetchOrdersWithProgress().catch(() => null);
+  const seq = ++loadOrdersSeq;
+  const _t0 = performance.now();
+  const _timer = setInterval(() => {
+    try { setOrdersProgress(Math.min(90, 90 * (performance.now() - _t0) / 1500)); } catch (e) {}
+  }, 100);
+  const firstFetch = fetchOrders({ limit: FIRST_PAGE })
+    .catch(() => null)
+    .finally(() => {
+      clearInterval(_timer);
+      try { setOrdersProgress(96); } catch (e) {}
+    });
   await loadMe();
-  const orders = await ordersFetch;
-  if (Array.isArray(orders) && !currentFilter && !currentPaymentFilter && !currentDateFrom && !currentDateTo) {
-    lastLoadedOrders = orders;
-    renderOrders(filterByTrackQuery(orders));
-  } else {
+  const first = await firstFetch;
+  if (!first || !Array.isArray(first.data)) {
     loadOrders();
+    return;
   }
+  if (seq !== loadOrdersSeq) return;
+  lastLoadedOrders = first.data;
+  renderOrders(filterByTrackQuery(first.data));
+  if (!first.truncated) return;
+  fetchOrders().then((all) => {
+    if (seq !== loadOrdersSeq) return;
+    lastLoadedOrders = all.data;
+    renderOrders(filterByTrackQuery(all.data));
+  });
 })();
