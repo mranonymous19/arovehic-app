@@ -45,11 +45,13 @@ UOM = os.environ.get("TALLY_UOM", "nos")  # unit of measure shown against each i
 HOME_STATE = os.environ.get("TALLY_HOME_STATE", "Karnataka")
 HSN_CODE = os.environ.get("TALLY_HSN_CODE", "")  # optional; printed on the invoice
 
-# Tally's internal markers. The \x04 prefix is how Tally stores its own built-in
+# Tally's internal markers, written as the XML character reference &#4; (NOT a raw
+# \x04 byte: x() strips control characters, which silently turned "Any" into a
+# plain " Any" that matches no state, so Tally read every GST rate as 0%). The \x04 prefix is how Tally stores its own built-in
 # option names ("Applicable", "Any") -- a plain "Applicable" is read as a
 # user-defined value and the GST details are ignored.
-TALLY_APPLICABLE = "\u0004 Applicable"
-TALLY_ANY = "\u0004 Any"
+TALLY_APPLICABLE = "&#4; Applicable"
+TALLY_ANY = "&#4; Any"
 
 # Tally's own spelling for the few states that differ from common usage.
 _TALLY_STATE_NAMES = {
@@ -248,7 +250,7 @@ def _stock_item_master(name, unit, since):
         f'<STOCKITEM NAME="{x(name)}">'
         f"<NAME.LIST><NAME>{x(name)}</NAME></NAME.LIST>"
         f"<BASEUNITS>{x(unit)}</BASEUNITS>"
-        f"<GSTAPPLICABLE>{x(TALLY_APPLICABLE)}</GSTAPPLICABLE>"
+        f"<GSTAPPLICABLE>{TALLY_APPLICABLE}</GSTAPPLICABLE>"
         "<GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>"
         "<GSTDETAILS.LIST>"
         f"<APPLICABLEFROM>{since}</APPLICABLEFROM>"
@@ -263,7 +265,7 @@ def _stock_item_master(name, unit, since):
         "<GSTINELIGIBLEITC>No</GSTINELIGIBLEITC>"
         "<INCLUDEEXPFORSLABCALC>No</INCLUDEEXPFORSLABCALC>"
         "<STATEWISEDETAILS.LIST>"
-        f"<STATENAME>{x(TALLY_ANY)}</STATENAME>"
+        f"<STATENAME>{TALLY_ANY}</STATENAME>"
         f"{rates}"
         "</STATEWISEDETAILS.LIST>"
         "</GSTDETAILS.LIST>"
