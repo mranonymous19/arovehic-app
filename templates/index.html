@@ -4,118 +4,186 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Arovehic — Order Desk</title>
+<script>try{if(localStorage.getItem('arovehic-theme')==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
+<link rel="icon" type="image/png" href="{{ url_for('static', filename='img/favicon.png') }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='img/logo-144.png') }}">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='theme.css') }}">
 </head>
 <body>
+  <!-- Top bar -->
   <header class="topbar">
-    <h1><span class="brand-mark">A</span>Arovehic Order Desk</h1>
-    <button type="button" id="menuToggle" class="menu-toggle" aria-label="Open menu" aria-expanded="false">&#9776;</button>
-    <div class="topbar-actions">
-      <button id="summaryBtn" class="btn btn-ghost" hidden>Summary</button>
-      <button id="syncBtn" class="btn btn-primary" hidden>Sync from Shopify</button>
-      <button id="pasteOrderBtn" class="btn btn-ghost" hidden>Add Order (paste)</button>
-      <button id="settingsBtn" class="btn btn-ghost" hidden>Settings</button>
-      <button id="usersBtn" class="btn btn-ghost" hidden>Manage Users</button>
-      <button id="activityLogBtn" class="btn btn-ghost" hidden>Activity Log</button>
-      <button id="cancelledBtn" class="btn btn-ghost" hidden>Cancelled Orders</button>
-      <button id="repurchaseBtn" class="btn btn-ghost" hidden>Repurchase</button>
-      <button id="trashBtn" class="btn btn-ghost" hidden>Trash</button>
-      <span id="userBadge" class="user-badge"></span>
-      <button id="accountBtn" class="btn btn-ghost">Account</button>
-      <a href="{{ url_for('logout') }}" class="btn btn-ghost">Log out</a>
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <img src="{{ url_for('static', filename='img/logo-144.png') }}" alt="" width="36" height="36">
+        </span>
+        <div class="brand-text">
+          <div class="brand-name">Arovehic</div>
+          <div class="brand-sub">Order Desk</div>
+        </div>
+      </div>
+
+      <!-- Sync integrity: compact status pill in the middle of the top bar -->
+      <div id="syncHealthCard" class="sync-health" hidden>
+        <div class="sync-health-main">
+          <div class="sync-health-label"><span id="syncHealthDot" class="sync-dot"></span><span id="syncHealthLabel">SYNC INTEGRITY</span></div>
+          <div class="sync-health-pct" id="syncHealthPct">--</div>
+          <div class="sync-health-sub" id="syncHealthSub">No syncs yet</div>
+          <div class="sync-bar" id="syncBar" hidden><div class="sync-bar-fill" id="syncBarFill"></div></div>
+        </div>
+        <div class="sync-health-side">
+          <div id="syncHealthStatus">--</div>
+          <div id="syncHealthAvg" class="sync-health-avg"></div>
+        </div>
+      </div>
+
+      <div class="topbar-right">
+        <span class="date-pill" data-today></span>
+
+        <div class="menu-wrap">
+          <button type="button" id="menuToggle" class="menu-btn" aria-haspopup="true" aria-expanded="false" aria-label="Open menu">
+            <svg class="ic-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+            <span class="menu-label">Menu</span>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+
+          <div class="menu-panel hidden-view" role="menu" aria-label="Menu">
+            <div class="menu-user"><span id="userBadge" class="user-badge"></span></div>
+            <div class="topbar-actions">
+              <button type="button" id="summaryBtn" class="menu-item" role="menuitem" data-hint="Order counts by date" hidden>Summary</button>
+              <button type="button" id="syncBtn" class="menu-item" role="menuitem" data-hint="Pull new orders now" hidden>Sync from Shopify</button>
+              <button type="button" id="pasteOrderBtn" class="menu-item" role="menuitem" data-hint="Enter an order by hand" hidden>Add Order (paste)</button>
+              <button type="button" id="settingsBtn" class="menu-item" role="menuitem" data-hint="Webhook and staff schedule" hidden>Settings</button>
+              <button type="button" id="usersBtn" class="menu-item" role="menuitem" data-hint="Add, reset or remove users" hidden>Manage Users</button>
+              <button type="button" id="activityLogBtn" class="menu-item" role="menuitem" data-hint="Who changed what" hidden>Activity Log</button>
+              <button type="button" id="accountBtn" class="menu-item" role="menuitem" data-hint="Change your password">Account</button>
+              <div class="menu-divider" role="separator"></div>
+              <a href="{{ url_for('logout') }}" class="menu-item danger" role="menuitem" data-hint="End this session">Log out</a>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </header>
 
-  <section id="heroBanner" class="hero" aria-label="Page banner">
-    <div class="hero-text">
-      <h2 id="heroTitle">Order desk</h2>
-      <p id="heroSub">Track purchases, status and dispatch for every order.</p>
-      <button type="button" id="heroBack" class="btn btn-primary btn-small" hidden>Back to all orders</button>
+  <div class="page">
+    <!-- Page header -->
+    <section id="heroBanner" class="page-header" aria-label="Page header">
+      <h1 id="heroTitle" class="page-title">Order desk</h1>
+      <span id="billingResultCount" class="billing-result-count"></span>
+    </section>
+
+    <div id="syncMsg" class="banner" hidden></div>
+
+    <!-- Filters -->
+    <div class="filter-card">
+      <div class="filters">
+        <div class="field field-grow">
+          <label class="date-filter-label" for="orderTrackInput">Track an order</label>
+          <div class="search-wrap">
+            <svg class="search-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            <input id="orderTrackInput" type="search" placeholder="Name, customer, or Order ID" class="order-track-input">
+          </div>
+        </div>
+        <div class="field">
+          <label class="date-filter-label" for="statusFilterSelect">Status</label>
+          <select id="statusFilterSelect" class="status-filter-select">
+            <option value="">All</option>
+            <option value="pending">Pending</option>
+            <option value="purchased">Purchased</option>
+            <option value="stock">In Stock</option>
+            <option value="na">N/A</option>
+            <option id="refundedFilterOption" value="refunded" hidden>Refunded</option>
+            <option value="wait">Wait</option>
+            <option value="closed">Closed</option>
+            <option value="billing">Billing</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="invoiceFilterRow" class="filters" hidden>
+        <div class="field">
+          <label class="date-filter-label" for="invoiceFilterSelect">Invoice</label>
+          <select id="invoiceFilterSelect" class="status-filter-select">
+            <option value="">All</option>
+            <option value="printed">Printed</option>
+            <option value="not_printed">Not printed</option>
+            <option value="bill_cancelled">Bill cancelled</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="date-filter-label" for="tallyFilterSelect">Tally XML</label>
+          <select id="tallyFilterSelect" class="status-filter-select">
+            <option value="">All</option>
+            <option value="exported">Exported</option>
+            <option value="not_exported">Not exported</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="filters">
+        <div class="field">
+          <label class="date-filter-label" for="dateFromInput">From</label>
+          <input id="dateFromInput" type="date" class="date-filter-input">
+        </div>
+        <div class="field">
+          <label class="date-filter-label" for="dateToInput">To</label>
+          <input id="dateToInput" type="date" class="date-filter-input">
+        </div>
+        <div class="field field-actions">
+          <button id="clearDateFilterBtn" class="btn btn-ghost" hidden>Clear dates</button>
+          <button id="exportPendingBtn" class="btn btn-ghost" hidden>Export Pending (Excel)</button>
+          <span id="tallyExportGroup" class="tally-export-group" hidden>
+            <button id="exportTallyXmlBtn" class="btn btn-ghost">Tally XML</button>
+            <label class="check-label tally-only-new" title="Skip invoices already exported, and mark these as exported. Auto-on when the Tally XML filter above is set to 'Not exported'.">
+              <input id="tallyOnlyNew" type="checkbox"> Only new
+            </label>
+          </span>
+        </div>
+        <div class="field field-end">
+          <span class="date-filter-label">Payment</span>
+          <div class="segmented" role="group" aria-label="Payment type">
+            <button class="filter-btn active" data-payment="">All</button>
+            <button class="filter-btn" data-payment="cod">COD</button>
+            <button class="filter-btn" data-payment="prepaid">Prepaid</button>
+          </div>
+        </div>
+      </div>
     </div>
-    <a id="heroCredit" class="hero-credit" target="_blank" rel="noopener"></a>
-  </section>
 
-  <div id="syncMsg" class="banner" hidden></div>
-
-  <div id="syncHealthCard" class="sync-health" hidden>
-    <div class="sync-health-main">
-      <div class="sync-health-label"><span id="syncHealthLabel">SYNC INTEGRITY</span> <span id="syncHealthDot" class="sync-dot"></span></div>
-      <div class="sync-health-pct" id="syncHealthPct">--</div>
-      <div class="sync-health-sub" id="syncHealthSub">No syncs yet</div>
-      <div class="sync-bar" id="syncBar" hidden><div class="sync-bar-fill" id="syncBarFill"></div></div>
-    </div>
-    <div class="sync-health-side">
-      <div id="syncHealthStatus">--</div>
-      <div id="syncHealthAvg" class="sync-health-avg"></div>
-    </div>
+    <main id="ordersContainer"></main>
   </div>
 
-  <div class="filters">
-    <input id="orderTrackInput" type="search" placeholder="Track an order — name, customer, or Order ID" class="order-track-input">
-    <label class="date-filter-label" for="statusFilterSelect">Status</label>
-    <select id="statusFilterSelect" class="status-filter-select">
-      <option value="">All</option>
-      <option value="pending">Pending</option>
-      <option value="purchased">Purchased</option>
-      <option value="stock">In Stock</option>
-      <option value="na">N/A</option>
-      <option id="refundedFilterOption" value="refunded" hidden>Refunded</option>
-      <option value="wait">Wait</option>
-      <option value="closed">Closed</option>
-      <option value="billing">Billing</option>
-    </select>
-  </div>
+  <!-- Floating bottom navigation -->
+  <nav class="bottom-nav" aria-label="Views">
+    <button type="button" id="navOrders" class="nav-item">Orders</button>
+    <button type="button" id="navBilling" class="nav-item">Billing</button>
+    <button type="button" id="cancelledBtn" class="nav-item" hidden>Cancelled</button>
+    <button type="button" id="trashBtn" class="nav-item" hidden>Trash</button>
+    <button type="button" id="repurchaseBtn" class="nav-item" hidden>Repurchase</button>
+  </nav>
 
-  <div id="invoiceFilterRow" class="filters" hidden>
-    <label class="date-filter-label" for="invoiceFilterSelect">Invoice</label>
-    <select id="invoiceFilterSelect" class="status-filter-select">
-      <option value="">All</option>
-      <option value="printed">Printed</option>
-      <option value="not_printed">Not printed</option>
-      <option value="bill_cancelled">Bill cancelled</option>
-    </select>
-    <label class="date-filter-label" for="tallyFilterSelect">Tally XML</label>
-    <select id="tallyFilterSelect" class="status-filter-select">
-      <option value="">All</option>
-      <option value="exported">Exported</option>
-      <option value="not_exported">Not exported</option>
-    </select>
-    <span id="billingResultCount" class="billing-result-count"></span>
-  </div>
-
-  <div class="filters">
-    <label class="date-filter-label" for="dateFromInput">From</label>
-    <input id="dateFromInput" type="date" class="date-filter-input">
-    <label class="date-filter-label" for="dateToInput">To</label>
-    <input id="dateToInput" type="date" class="date-filter-input">
-    <button id="clearDateFilterBtn" class="btn btn-ghost btn-small" hidden>Clear dates</button>
-    <button id="exportPendingBtn" class="btn btn-ghost btn-small" hidden>Export Pending (Excel)</button>
-    <span id="tallyExportGroup" class="tally-export-group" hidden>
-      <button id="exportTallyXmlBtn" class="btn btn-ghost btn-small">Tally XML</button>
-      <label class="date-filter-label tally-only-new" title="Skip invoices already exported, and mark these as exported. Auto-on when the Tally XML filter above is set to 'Not exported'.">
-        <input id="tallyOnlyNew" type="checkbox"> Only new
-      </label>
-    </span>
-
-    <span class="filter-divider"></span>
-
-    <button class="filter-btn active" data-payment="">All payments</button>
-    <button class="filter-btn" data-payment="cod">COD</button>
-    <button class="filter-btn" data-payment="prepaid">Prepaid</button>
-  </div>
-
-  <main id="ordersContainer"></main>
+  <div class="toast-stack" aria-live="polite"></div>
 
   <!-- Settings modal (owner only) -->
   <div id="settingsModal" class="modal" hidden>
     <div class="modal-box">
-      <h2>Settings</h2>
+      <div class="modal-head">
+        <span class="modal-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg></span>
+        <div class="modal-head-text">
+          <h2>Settings</h2>
+          <p class="modal-subtext">Shopify sync source and COD / Prepaid staff schedule.</p>
+        </div>
+      </div>
       <label for="webhookInput">n8n webhook URL (returns Shopify orders as JSON)</label>
       <input id="webhookInput" type="text" placeholder="https://your-n8n-instance.app/webhook/orders">
-      <div class="modal-actions">
-        <button id="saveSettingsBtn" class="btn btn-primary">Save</button>
+      <div class="modal-actions modal-actions-inline">
         <button id="closeSettingsBtn" class="btn btn-ghost">Cancel</button>
+        <button id="saveSettingsBtn" class="btn btn-primary">Save</button>
       </div>
 
       <h3 class="modal-subheading">Schedule — COD / Prepaid staff</h3>
@@ -130,8 +198,8 @@
       <div id="codStaffList" class="staff-checkbox-list"></div>
       <label>Staff assigned to Prepaid orders</label>
       <div id="prepaidStaffList" class="staff-checkbox-list"></div>
-      <div id="scheduleError" class="field-error" hidden></div>
       <div class="modal-actions">
+        <div class="status-slot"><div id="scheduleError" class="field-error" hidden></div></div>
         <button id="saveScheduleBtn" class="btn btn-primary">Save schedule</button>
       </div>
     </div>
@@ -140,16 +208,21 @@
   <!-- Account modal (everyone) -->
   <div id="accountModal" class="modal" hidden>
     <div class="modal-box">
-      <h2>Account</h2>
-      <p class="modal-subtext">Signed in as <strong id="accountName"></strong> (<span id="accountRole"></span>)</p>
+      <div class="modal-head">
+        <span class="modal-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg></span>
+        <div class="modal-head-text">
+          <h2>Account</h2>
+          <p class="modal-subtext">Signed in as <strong id="accountName"></strong> (<span id="accountRole"></span>)</p>
+        </div>
+      </div>
       <label for="currentPasswordInput">Current password</label>
       <input id="currentPasswordInput" type="password" autocomplete="current-password">
       <label for="newPasswordInput">New password</label>
       <input id="newPasswordInput" type="password" autocomplete="new-password" placeholder="At least 4 characters">
-      <div id="accountError" class="field-error" hidden></div>
       <div class="modal-actions">
-        <button id="savePasswordBtn" class="btn btn-primary">Change password</button>
+        <div class="status-slot"><div id="accountError" class="field-error" hidden></div></div>
         <button id="closeAccountBtn" class="btn btn-ghost">Close</button>
+        <button id="savePasswordBtn" class="btn btn-primary">Change password</button>
       </div>
     </div>
   </div>
@@ -157,14 +230,22 @@
   <!-- Manage Users modal (owner only) -->
   <div id="usersModal" class="modal" hidden>
     <div class="modal-box modal-box-wide">
-      <h2>Manage Users</h2>
+      <div class="modal-head">
+        <span class="modal-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0"/><path d="M16 4.5a4 4 0 0 1 0 7"/><path d="M22 21a7 7 0 0 0-4.5-6.5"/></svg></span>
+        <div class="modal-head-text">
+          <h2>Manage Users</h2>
+          <p class="modal-subtext">Add team members, reset passwords or remove access.</p>
+        </div>
+      </div>
 
-      <table class="users-table">
-        <thead>
-          <tr><th>Name</th><th>Role</th><th></th></tr>
-        </thead>
-        <tbody id="usersTableBody"></tbody>
-      </table>
+      <div class="table-wrap">
+        <table class="users-table">
+          <thead>
+            <tr><th>Name</th><th>Role</th><th></th></tr>
+          </thead>
+          <tbody id="usersTableBody"></tbody>
+        </table>
+      </div>
 
       <h3 class="modal-subheading">Add a user</h3>
       <div class="form-grid">
@@ -187,10 +268,10 @@
           </select>
         </div>
       </div>
-      <div id="usersError" class="field-error" hidden></div>
       <div class="modal-actions">
-        <button id="addUserBtn" class="btn btn-primary">Add user</button>
+        <div class="status-slot"><div id="usersError" class="field-error" hidden></div></div>
         <button id="closeUsersBtn" class="btn btn-ghost">Close</button>
+        <button id="addUserBtn" class="btn btn-primary">Add user</button>
       </div>
     </div>
   </div>
@@ -198,8 +279,13 @@
   <!-- Add order manually via paste (owner only) -->
   <div id="pasteOrderModal" class="modal" hidden>
     <div class="modal-box modal-box-wide manual-order-modal">
-      <h2>Add Order (manual)</h2>
-      <p class="modal-subtext">For orders that don't come through Shopify — fill in each field below.</p>
+      <div class="modal-head">
+        <span class="modal-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></span>
+        <div class="modal-head-text">
+          <h2>Add Order (manual)</h2>
+          <p class="modal-subtext">For orders that don't come through Shopify — fill in each field below.</p>
+        </div>
+      </div>
 
       <div class="mo-grid">
         <label>Order ID
@@ -256,8 +342,8 @@
         <strong id="moTotalDisplay">₹0.00</strong>
       </div>
 
-      <p id="pasteOrderError" class="field-error" hidden></p>
       <div class="modal-actions">
+        <div class="status-slot"><p id="pasteOrderError" class="field-error" hidden></p></div>
         <button id="closePasteOrderBtn" class="btn btn-ghost">Cancel</button>
         <button id="submitPasteOrderBtn" class="btn btn-primary">Add Order</button>
       </div>
@@ -267,8 +353,13 @@
   <!-- Edit order modal (accounts/owner, Billing) -->
   <div id="editOrderModal" class="modal" hidden>
     <div class="modal-box modal-box-wide manual-order-modal">
-      <h2 id="eoTitle">Edit Order</h2>
-      <p class="modal-subtext">Change customer details, delivery charge, items, quantities and prices — or add more items.</p>
+      <div class="modal-head">
+        <span class="modal-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></span>
+        <div class="modal-head-text">
+          <h2 id="eoTitle">Edit Order</h2>
+          <p class="modal-subtext">Change customer details, delivery charge, items, quantities and prices — or add more items.</p>
+        </div>
+      </div>
 
       <div class="mo-grid">
         <label>Customer Name
@@ -316,12 +407,14 @@
         <strong id="eoTotalDisplay">₹0.00</strong>
       </div>
 
-      <p id="eoWarn" class="field-error" hidden></p>
-      <p id="eoError" class="field-error" hidden></p>
       <div class="modal-actions">
+        <div class="status-slot">
+          <p id="eoWarn" class="field-error" hidden></p>
+          <p id="eoError" class="field-error" hidden></p>
+        </div>
         <button id="eoCancelBtn" class="btn btn-ghost">Cancel</button>
-        <button id="eoSaveBtn" class="btn btn-primary">Save Changes</button>
         <button id="eoSaveReprintBtn" class="btn btn-ghost" hidden>Save &amp; Reprint Invoice</button>
+        <button id="eoSaveBtn" class="btn btn-primary">Save Changes</button>
       </div>
     </div>
   </div>
@@ -329,9 +422,15 @@
   <!-- Summary modal (order counts, date-range filterable) -->
   <div id="summaryModal" class="modal" hidden>
     <div class="modal-box modal-box-wide">
-      <h2>Summary</h2>
+      <div class="modal-head">
+        <span class="modal-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M8 16v-4M13 16V8M18 16v-6"/></svg></span>
+        <div class="modal-head-text">
+          <h2>Summary</h2>
+          <p class="modal-subtext">Orders arrived, billed and still pending for a period.</p>
+        </div>
+      </div>
 
-      <div class="filters summary-range-filters">
+      <div class="filters summary-range-filters segmented" role="group" aria-label="Date range">
         <button class="filter-btn active" data-range="today">Today</button>
         <button class="filter-btn" data-range="yesterday">Yesterday</button>
         <button class="filter-btn" data-range="7days">Last 7 Days</button>
@@ -340,43 +439,51 @@
 
       <div id="summaryCustomRange" class="summary-custom-range" hidden>
         <div class="summary-custom-row">
-          <label class="date-filter-label" for="summaryFromInput">From</label>
-          <input id="summaryFromInput" type="date" class="date-filter-input">
-          <label class="date-filter-label" for="summaryToInput">To</label>
-          <input id="summaryToInput" type="date" class="date-filter-input">
+          <div class="field">
+            <label class="date-filter-label" for="summaryFromInput">From</label>
+            <input id="summaryFromInput" type="date" class="date-filter-input">
+          </div>
+          <div class="field">
+            <label class="date-filter-label" for="summaryToInput">To</label>
+            <input id="summaryToInput" type="date" class="date-filter-input">
+          </div>
         </div>
         <div class="summary-custom-row">
-          <label class="date-filter-label" for="summaryOrderIdFromInput">Order ID from</label>
-          <input id="summaryOrderIdFromInput" type="text" inputmode="numeric" placeholder="e.g. 1041" class="date-filter-input summary-order-id-input">
-          <label class="date-filter-label" for="summaryOrderIdToInput">to</label>
-          <input id="summaryOrderIdToInput" type="text" inputmode="numeric" placeholder="e.g. 1050" class="date-filter-input summary-order-id-input">
+          <div class="field">
+            <label class="date-filter-label" for="summaryOrderIdFromInput">Order ID from</label>
+            <input id="summaryOrderIdFromInput" type="text" inputmode="numeric" placeholder="e.g. 1041" class="date-filter-input summary-order-id-input">
+          </div>
+          <div class="field">
+            <label class="date-filter-label" for="summaryOrderIdToInput">to</label>
+            <input id="summaryOrderIdToInput" type="text" inputmode="numeric" placeholder="e.g. 1050" class="date-filter-input summary-order-id-input">
+          </div>
         </div>
         <p class="modal-subtext summary-order-id-hint">
           Not finishing a full day's orders in one go? Narrow to just the
           order numbers you've handled — leave the dates blank to use the
           Order ID range on its own.
         </p>
-        <button id="summaryApplyCustomBtn" class="btn btn-primary btn-small">Apply</button>
+        <div><button id="summaryApplyCustomBtn" class="btn btn-primary btn-small">Apply</button></div>
       </div>
 
       <p id="summaryRangeLabel" class="modal-subtext"></p>
 
       <div class="today-summary">
         <div class="today-summary-stat">
-          <span class="today-summary-value" id="summaryArrivedVal">0</span>
           <span class="today-summary-label">Orders Arrived</span>
+          <span class="today-summary-value" id="summaryArrivedVal">0</span>
           <button type="button" class="summary-view-orders-btn" data-bucket="arrived">View orders</button>
           <div class="summary-order-list" id="summaryArrivedList" hidden></div>
         </div>
         <div class="today-summary-stat">
-          <span class="today-summary-value" id="summaryBillingVal">0</span>
           <span class="today-summary-label">Proceeded for Billing</span>
+          <span class="today-summary-value" id="summaryBillingVal">0</span>
           <button type="button" class="summary-view-orders-btn" data-bucket="billing">View orders</button>
           <div class="summary-order-list" id="summaryBillingList" hidden></div>
         </div>
         <div class="today-summary-stat">
-          <span class="today-summary-value" id="summaryPendingVal">0</span>
           <span class="today-summary-label">Still Pending</span>
+          <span class="today-summary-value" id="summaryPendingVal">0</span>
           <button type="button" class="summary-view-orders-btn" data-bucket="pending">View orders</button>
           <div class="summary-order-list" id="summaryPendingList" hidden></div>
         </div>
@@ -391,9 +498,17 @@
   <!-- Activity log (owner only) -->
   <div id="activityLogModal" class="modal" hidden>
     <div class="modal-box modal-box-wide">
-      <h2>Activity Log</h2>
-      <p class="modal-subtext">Who added, changed, or synced what — most recent first.</p>
-      <input id="activityLogSearch" type="search" placeholder="Search (item, order, staff name...)">
+      <div class="modal-head">
+        <span class="modal-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+        <div class="modal-head-text">
+          <h2>Activity Log</h2>
+          <p class="modal-subtext">Who added, changed, or synced what — most recent first.</p>
+        </div>
+      </div>
+      <div class="search-wrap">
+        <svg class="search-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="activityLogSearch" type="search" placeholder="Search (item, order, staff name...)">
+      </div>
       <div id="activityLogList"><p class="empty-log">Loading…</p></div>
       <div class="modal-actions">
         <button id="closeActivityLogBtn" class="btn btn-ghost">Close</button>
@@ -404,8 +519,13 @@
   <!-- Repurchase: pick the damaged items of one order -->
   <div id="repurchaseModal" class="modal" hidden>
     <div class="modal-box modal-box-wide">
-      <h2 id="rpTitle">Repurchase</h2>
-      <p class="modal-subtext">Tick only the items that need to be re-purchased and re-sent. The original order and its bill are not changed.</p>
+      <div class="modal-head">
+        <span class="modal-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg></span>
+        <div class="modal-head-text">
+          <h2 id="rpTitle">Repurchase</h2>
+          <p class="modal-subtext">Tick only the items that need to be re-purchased and re-sent. The original order and its bill are not changed.</p>
+        </div>
+      </div>
       <div id="rpItems"><p class="empty-log">Loading…</p></div>
       <label>Reason (optional)
         <input id="rpReason" type="text" placeholder="e.g. damaged in transit">
@@ -420,8 +540,13 @@
   <!-- Repurchase: the separate list -->
   <div id="repurchaseListModal" class="modal" hidden>
     <div class="modal-box modal-box-wide">
-      <h2>Repurchase</h2>
-      <p class="modal-subtext">Items being re-purchased and re-sent. Own bills (RPR), separate from orders, their invoices and Tally.</p>
+      <div class="modal-head">
+        <span class="modal-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg></span>
+        <div class="modal-head-text">
+          <h2>Repurchase</h2>
+          <p class="modal-subtext">Items being re-purchased and re-sent. Own bills (RPR), separate from orders, their invoices and Tally.</p>
+        </div>
+      </div>
       <div id="rpStatusFilter" class="status-pills rp-filter-pills"></div>
       <div id="rpList"><p class="empty-log">Loading…</p></div>
       <div class="modal-actions">

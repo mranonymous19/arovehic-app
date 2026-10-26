@@ -575,15 +575,15 @@ function renderOrders(orders) {
   if (!orders.length) {
     if (orderTrackQuery.trim()) {
       ordersContainer.innerHTML = `
-        <div class="empty-state">
-          <div class="glyph">— no match —</div>
+        <div class="empty-state empty-search">
+          <div class="glyph">No match</div>
           <p>No order matches "${escapeHtml(orderTrackQuery.trim())}".</p>
         </div>`;
       return;
     }
     ordersContainer.innerHTML = `
       <div class="empty-state">
-        <div class="glyph">— empty manifest —</div>
+        <div class="glyph">All caught up</div>
         <p>${currentFilter === "trash" ? "Trash is empty." : currentFilter === "cancelled" ? "No cancelled orders." : `No orders yet.${currentRole === "owner" ? " Set your n8n webhook in Settings, then hit Sync from Shopify." : " Ask an owner to sync from Shopify."}`}</p>
       </div>`;
     return;
