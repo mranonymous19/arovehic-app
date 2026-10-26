@@ -1062,6 +1062,50 @@ def api_sync_progress():
     return jsonify({**st, "percent": percent})
 
 
+# ---------------------------------------------------------------------------
+# Automatic (scheduled) sync. n8n's Schedule Trigger calls this twice a day.
+# No login session here, so it is protected by a shared secret instead:
+# set AUTO_SYNC_TOKEN in the environment and send the same value in the
+# X-Auto-Sync-Token header. The manual "Sync from Shopify" button is unchanged.
+# ---------------------------------------------------------------------------
+
+AUTO_SYNC_TOKEN = os.environ.get("AUTO_SYNC_TOKEN", "")
+
+
+def _auto_sync_authorized():
+    import hmac
+    sent = request.headers.get("X-Auto-Sync-Token", "")
+    return bool(AUTO_SYNC_TOKEN) and hmac.compare_digest(sent, AUTO_SYNC_TOKEN)
+
+
+@app.route("/api/sync/auto", methods=["POST"])
+def api_sync_auto():
+    import threading
+    if not _auto_sync_authorized():
+        return jsonify({"error": "Unauthorized"}), 401
+    webhook_url = get_setting("n8n_webhook_url")
+    if not webhook_url:
+        return jsonify({"error": "No n8n webhook URL configured. Set it in Settings first."}), 400
+
+    current = _read_progress()
+    if current and current.get("state") == "running" and time.time() - current.get("started", 0) < 720:
+        return jsonify({"ok": True, "skipped": "A sync is already running."}), 200
+
+    state = {"id": uuid.uuid4().hex, "state": "running", "phase": "fetching",
+             "started": time.time(), "expected_ms": 8000, "done": 0, "total": 0}
+    _write_progress(state)
+    threading.Thread(target=_run_sync_job, args=(state, webhook_url, "Auto-sync"), daemon=True).start()
+    return jsonify({"ok": True, "id": state["id"]}), 202
+
+
+@app.route("/api/sync/auto/status", methods=["GET"])
+def api_sync_auto_status():
+    if not _auto_sync_authorized():
+        return jsonify({"error": "Unauthorized"}), 401
+    st = _read_progress() or {"state": "idle"}
+    return jsonify({k: st.get(k) for k in ("id", "state", "phase", "orders_synced", "items_synced", "message")})
+
+
 @app.route("/api/orders/manual", methods=["POST"])
 @telecaller_or_owner_required
 def api_add_manual_order():
@@ -1297,6 +1341,13 @@ def api_orders():
         query += " AND NULLIF(created_at, '')::date <= %s::date"
         params.append(date_to)
     query += " ORDER BY created_at DESC"
+    _limit_n = request.args.get("limit", type=int)
+    if _limit_n and _limit_n > 0:
+        _limit_n = min(_limit_n, 1000)
+        query += " LIMIT %s"
+        params.append(_limit_n)
+    else:
+        _limit_n = None
     cur.execute(query, params)
     orders = cur.fetchall()
 
@@ -1479,6 +1530,7 @@ def api_orders():
     # Uncompressed size, so the browser can show a real download progress even
     # when a proxy (Caddy) gzips the response and hides Content-Length.
     resp.headers["X-Raw-Length"] = str(len(resp.get_data()))
+    resp.headers["X-Truncated"] = "1" if (_limit_n and len(orders) >= _limit_n) else "0"
     return resp
 
 
