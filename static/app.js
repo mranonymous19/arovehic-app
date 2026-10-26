@@ -25,6 +25,12 @@ let currentRole = null;
 let currentName = "";
 let lastLoadedOrders = [];
 let orderTrackQuery = "";
+// Billing bulk PDF: order_ids ticked for the combined invoice PDF
+const bulkSelected = new Set();
+// true while "Select all" is ticked: every filter view (Printed, Not printed...)
+// then selects all of its own bills.
+let bulkAllMode = false;
+let lastRenderedOrders = [];
 
 const ordersContainer = document.getElementById("ordersContainer");
 const orderTrackInput = document.getElementById("orderTrackInput");
@@ -561,6 +567,16 @@ async function printInvoice(orderId, buttonEl, preOpenedTab) {
 
 function renderOrders(orders) {
   ordersContainer.innerHTML = "";
+  lastRenderedOrders = orders;
+  if (bulkAllMode) {
+    bulkSelected.clear();
+    for (const o of orders) if (!o.bill_cancelled) bulkSelected.add(o.order_id);
+  } else if (bulkSelected.size) {
+    // Selection follows what's on the page: when a filter (Invoice, Tally, search,
+    // payment...) hides an order, it is unticked too, so PDF (n) = ticked orders shown.
+    const shownIds = new Set(orders.map((o) => o.order_id));
+    for (const id of [...bulkSelected]) if (!shownIds.has(id)) bulkSelected.delete(id);
+  }
 
   // Running count of whatever's currently in view in Billing — most useful
   // with the Invoice filter set to "Not printed" (or Tally set to "Not
@@ -573,6 +589,7 @@ function renderOrders(orders) {
   }
 
   if (!orders.length) {
+    updateBulkUI();
     if (orderTrackQuery.trim()) {
       ordersContainer.innerHTML = `
         <div class="empty-state empty-search">
@@ -591,7 +608,7 @@ function renderOrders(orders) {
 
   for (const order of orders) {
     const card = document.createElement("div");
-    card.className = "order-card";
+    card.className = "order-card" + (bulkSelected.has(order.order_id) ? " is-picked" : "");
     card.dataset.orderName = order.order_name || "";
 
     const head = document.createElement("div");
@@ -603,6 +620,11 @@ function renderOrders(orders) {
       ? `<span class="assigned-to">Assigned: ${escapeHtml(order.assigned_to)}</span>`
       : "";
     const showInvoiceInfo = currentFilter === "billing";
+    // Bulk PDF tick box (Billing, owner/accounts — same people as Tally export)
+    const canBulkPick = showInvoiceInfo && (currentRole === "owner" || currentRole === "accounts");
+    const bulkPick = canBulkPick
+      ? `<label class="bulk-pick" title="${order.bill_cancelled ? "Bill cancelled — can't be printed" : "Select for PDF"}"><input type="checkbox" class="bulk-pick-input" data-order-id="${escapeHtml(order.order_id)}" ${bulkSelected.has(order.order_id) ? "checked" : ""} ${order.bill_cancelled ? "disabled" : ""} aria-label="Select ${escapeHtml(order.order_name || order.order_id)} for PDF"></label>`
+      : "";
     // Staff can only print the first, not-yet-printed copy of an invoice
     // (for their own assigned orders — /api/orders already scopes what
     // they see); reprinting an already-printed one stays accounts/owner
@@ -667,6 +689,7 @@ function renderOrders(orders) {
       : "";
     head.innerHTML = `
       <span class="order-head-left">
+        ${bulkPick}
         <span class="order-name">${escapeHtml(order.order_name)}</span>
         <span class="customer">${escapeHtml(order.customer_name || "")}</span>
         ${order.closed ? `<span class="order-closed-badge">Closed</span>` : ""}
@@ -754,6 +777,7 @@ function renderOrders(orders) {
 
     ordersContainer.appendChild(card);
   }
+  updateBulkUI();
 }
 
 // Only accounts/owner, and only inside Billing — that's where invoices are
@@ -1697,6 +1721,167 @@ function updateTallyExportVisibility() {
     currentFilter === "billing" && (currentRole === "owner" || currentRole === "accounts")
   );
 }
+
+// ---------------------------------------------------------------------------
+// Billing: tick orders (or Select all) -> PDF downloads all their invoices in
+// one file. Each invoice goes through the same server steps as Print Invoice
+// (never-printed orders get their invoice number now). Max 200 per PDF.
+// ---------------------------------------------------------------------------
+const BULK_PDF_LIMIT = 200;
+// Find the Select all / PDF controls — or add them next to Tally XML if this page
+// was served from an older index.html, so a missing element can never stop the
+// rest of the app (roles, buttons, sync) from loading.
+function ensureBulkControls() {
+  let all = document.getElementById("bulkSelectAll");
+  let btn = document.getElementById("bulkPdfBtn");
+  if (all && btn) return [all, btn];
+  if (!tallyExportGroup) return [all, btn];
+  if (!all) {
+    const div = document.createElement("span");
+    div.className = "bulk-divider";
+    div.setAttribute("aria-hidden", "true");
+    const lab = document.createElement("label");
+    lab.className = "check-label bulk-select-all";
+    lab.title = "Select every order shown below (max 200 per PDF)";
+    all = document.createElement("input");
+    all.type = "checkbox";
+    all.id = "bulkSelectAll";
+    lab.append(all, " Select all");
+    tallyExportGroup.append(div, lab);
+  }
+  if (!btn) {
+    btn = document.createElement("button");
+    btn.id = "bulkPdfBtn";
+    btn.className = "btn btn-primary";
+    btn.type = "button";
+    btn.disabled = true;
+    btn.title = "Download the selected orders' invoices as one PDF";
+    btn.textContent = "PDF";
+    tallyExportGroup.append(btn);
+  }
+  return [all, btn];
+}
+const [bulkSelectAll, bulkPdfBtn] = ensureBulkControls();
+
+function bulkPickableOrders() {
+  return lastRenderedOrders.filter((o) => !o.bill_cancelled);
+}
+
+function updateBulkUI() {
+  const bulkPdfBtn = document.getElementById("bulkPdfBtn");
+  const bulkSelectAll = document.getElementById("bulkSelectAll");
+  if (!bulkPdfBtn || !bulkSelectAll) return;
+  const n = bulkSelected.size;
+  bulkPdfBtn.disabled = n === 0;
+  bulkPdfBtn.textContent = n ? `PDF (${n})` : "PDF";
+  bulkPdfBtn.title = n > BULK_PDF_LIMIT
+    ? `Max ${BULK_PDF_LIMIT} invoices per PDF — ${n} selected`
+    : "Download the selected orders' invoices as one PDF";
+  const pickable = bulkPickableOrders();
+  const pickedHere = pickable.filter((o) => bulkSelected.has(o.order_id)).length;
+  bulkSelectAll.checked = bulkAllMode || (pickable.length > 0 && pickedHere === pickable.length);
+  bulkSelectAll.indeterminate = pickedHere > 0 && pickedHere < pickable.length;
+}
+
+// One listener for every order's tick box
+ordersContainer.addEventListener("change", (e) => {
+  const box = e.target.closest(".bulk-pick-input");
+  if (!box) return;
+  const id = box.dataset.orderId;
+  if (box.checked) bulkSelected.add(id); else { bulkSelected.delete(id); bulkAllMode = false; }
+  const card = box.closest(".order-card");
+  if (card) card.classList.toggle("is-picked", box.checked);
+  updateBulkUI();
+});
+
+bulkSelectAll?.addEventListener("change", () => {
+  bulkAllMode = bulkSelectAll.checked;
+  const pickable = bulkPickableOrders();
+  for (const o of pickable) {
+    if (bulkSelectAll.checked) bulkSelected.add(o.order_id); else bulkSelected.delete(o.order_id);
+  }
+  ordersContainer.querySelectorAll(".bulk-pick-input:not(:disabled)").forEach((box) => {
+    box.checked = bulkSelectAll.checked;
+    const card = box.closest(".order-card");
+    if (card) card.classList.toggle("is-picked", box.checked);
+  });
+  updateBulkUI();
+  if (bulkSelectAll.checked && bulkSelected.size > BULK_PDF_LIMIT) {
+    showMessage(`${bulkSelected.size} orders selected — max ${BULK_PDF_LIMIT} per PDF. Narrow it with the date or Invoice filter.`, true);
+  }
+});
+
+bulkPdfBtn?.addEventListener("click", async () => {
+  const ids = [...bulkSelected];
+  if (!ids.length) return;
+  if (ids.length > BULK_PDF_LIMIT) {
+    showMessage(`Max ${BULK_PDF_LIMIT} invoices per PDF — ${ids.length} selected. Narrow it with the date or Invoice filter.`, true);
+    return;
+  }
+  const notPrinted = lastLoadedOrders.filter((o) => bulkSelected.has(o.order_id) && !o.invoice_number).length;
+  if (notPrinted && !confirm(`${notPrinted} of the ${ids.length} selected order(s) have never been printed — they will get their invoice numbers now. Continue?`)) {
+    return;
+  }
+  bulkPdfBtn.disabled = true;
+  bulkPdfBtn.textContent = `Preparing ${ids.length}…`;
+  try {
+    const res = await fetch("/api/invoices/bulk.pdf", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ order_ids: ids }),
+    });
+    if (!res.ok) {
+      if (res.status === 404) {
+        // The page is new but the server is still the old app.py (no PDF route yet)
+        showMessage("PDF isn't available on the server yet — the app is still running the old app.py. Close the app window, start it again (python app.py), then try again.", true);
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      showMessage(data.error || "Could not make the invoices PDF.", true);
+      return;
+    }
+    const count = Number(res.headers.get("X-Invoice-Count") || 0);
+    const fresh = Number(res.headers.get("X-Invoice-New") || 0);
+    const skipped = Number(res.headers.get("X-Invoice-Skipped") || 0);
+    const skippedInfo = decodeURIComponent(res.headers.get("X-Invoice-Skipped-Info") || "");
+    const cd = res.headers.get("Content-Disposition") || "";
+    const nameMatch = cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+    const filename = nameMatch ? decodeURIComponent(nameMatch[1]) : "invoices.pdf";
+    const blobUrl = URL.createObjectURL(await res.blob());
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+
+    // Same as single Print Invoice: flip each order's badge to "Invoice Printed · number
+    // · by you" and its button to "Reprint Invoice" right now, from this response.
+    try {
+      const results = JSON.parse(decodeURIComponent(res.headers.get("X-Invoice-Results") || "[]"));
+      const printedBy = decodeURIComponent(res.headers.get("X-Invoice-Printed-By") || "") || currentName;
+      const byId = new Map(lastLoadedOrders.map((o) => [o.order_id, o]));
+      for (const [orderId, invoiceNumber] of results) {
+        const order = byId.get(orderId);
+        if (order) { order.invoice_number = invoiceNumber; order.invoice_printed_by = printedBy; }
+      }
+    } catch (e) { /* the list reload below still brings everything up to date */ }
+
+    let msg = `Downloaded ${count} invoice${count === 1 ? "" : "s"}` + (fresh ? ` (${fresh} newly numbered)` : "") + ".";
+    if (skipped) msg += ` Skipped ${skipped}: ${skippedInfo}`;
+    showMessage(msg, skipped > 0);
+    bulkSelected.clear();
+    bulkAllMode = false;
+    renderOrders(filterByTrackQuery(lastLoadedOrders)); // instant: Printed badges + Reprint buttons
+    loadOrders(); // then refresh everything from the server (dates, totals, Tally status)
+  } catch (err) {
+    showMessage("Could not reach the server to make the invoices PDF.", true);
+  } finally {
+    bulkPdfBtn.disabled = bulkSelected.size === 0;
+    updateBulkUI();
+  }
+});
 
 async function downloadTally(kind, buttonEl) {
   const params = new URLSearchParams();

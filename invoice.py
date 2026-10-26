@@ -176,17 +176,22 @@ def fmt_amount(n):
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def build_invoice_pdf(order, items, invoice_number, invoice_date_str):
+def build_invoice_pdf(order, items, invoice_number, invoice_date_str, c=None):
     """
     order: dict with customer_name, shipping_address1/2, shipping_city,
            shipping_state, shipping_pincode, customer_phone, shipping_amount
     items: list of dicts with title, variant_title, quantity, price
     invoice_number: e.g. "SHP/2501/2026"
     invoice_date_str: e.g. "14-Aug-26"
-    Returns a BytesIO containing the PDF.
+    c: optional existing canvas. When given, the invoice is drawn onto it as
+       new page(s) and nothing is returned (used to put many invoices into
+       one PDF). When omitted, a new PDF is made and returned as before.
+    Returns a BytesIO containing the PDF (only when c is not given).
     """
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
+    own_canvas = c is None
+    if own_canvas:
+        buf = io.BytesIO()
+        c = canvas.Canvas(buf, pagesize=A4)
     page_w, page_h = A4
 
     margin = 30
@@ -512,6 +517,8 @@ def build_invoice_pdf(order, items, invoice_number, invoice_date_str):
     _text(c, page_w / 2, y, "This is a Computer Generated Invoice", font="Helvetica", size=8, align="center")
 
     c.showPage()
+    if not own_canvas:
+        return None
     c.save()
     buf.seek(0)
     return buf

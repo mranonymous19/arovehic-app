@@ -284,6 +284,15 @@ main#ordersContainer{display:flex;flex-direction:column;gap:12px;padding:0}
 .ic-bill{--ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23dc2626' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 3h14v18l-3-2-2 2-2-2-2 2-2-2-3 2z'/%3E%3Cpath d='M9 8h6M9 12h6'/%3E%3C/svg%3E")}
 .ic-trash{--ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23dc2626' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 6h18'/%3E%3Cpath d='M8 6V4h8v2'/%3E%3Cpath d='M6 6l1 14h10l1-14'/%3E%3Cpath d='M10 11v5M14 11v5'/%3E%3C/svg%3E")}
 
+/* Billing: bulk PDF tick boxes */
+.bulk-pick{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;margin:-4px 0 -4px -7px;border-radius:8px;cursor:pointer;transition:background-color .15s}
+.bulk-pick:hover{background:var(--s100)}
+.bulk-pick input{width:18px;height:18px}
+.order-card.is-picked{border-color:var(--brand);box-shadow:0 0 0 1px var(--brand),var(--card-shadow)}
+.order-card.is-picked .order-head{background:var(--brand-50)}
+.bulk-divider{width:1px;align-self:stretch;min-height:24px;background:var(--line);margin:0 4px}
+#bulkPdfBtn{min-width:76px}
+
 /* Item rows */
 .item-row{grid-template-columns:minmax(0,1fr) auto auto;gap:16px;padding:12px 20px;border-bottom:0;border-top:1px solid var(--s100);transition:background-color .15s}
 .order-head + .item-row{border-top:0}
@@ -553,6 +562,10 @@ body.is-loading .topbar::after{content:"";position:absolute;left:0;bottom:-1px;h
   .field-actions{flex-direction:column;align-items:stretch}
   .field-actions .btn,.tally-export-group{width:100%}
   .tally-export-group .btn{flex:1}
+  .tally-export-group{flex-wrap:wrap}
+  .bulk-divider{display:none}
+  .tally-export-group .bulk-select-all{flex:1 1 auto}
+  #bulkPdfBtn{flex:1 1 100%}
   .status-filter-select{min-width:0;width:100%}
   .segmented{display:flex}
   .segmented .filter-btn{flex:1 1 0}

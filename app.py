@@ -17,6 +17,13 @@ import requests
 from flask import Flask, g, jsonify, redirect, render_template, request, session, send_file, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
+import io
+from urllib.parse import quote
+import json
+
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas as pdf_canvas
+
 from invoice import build_invoice_pdf
 import tally_export
 
@@ -1700,27 +1707,37 @@ def api_export_pending_orders():
     )
 
 
-@app.route("/api/orders/<order_id>/invoice.pdf", methods=["GET"])
-@can_print_invoice_required
-def api_order_invoice(order_id):
-    db = get_db()
+class InvoiceError(Exception):
+    """An order that can't be invoiced right now (message + HTTP status)."""
+    def __init__(self, message, status=400):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+def _issue_invoice(db, order_id, cod_threshold):
+    """Everything one invoice print does, shared by the single Print Invoice
+    route and the bulk PDF route so the two can never behave differently:
+    checks, invoice number (first print) or reprint, activity log, saved
+    totals. Returns (order_dict, billing_items, invoice_number, invoice_date,
+    is_first_print). Raises InvoiceError if this order can't be invoiced."""
     cur = db.cursor()
     cur.execute("SELECT * FROM orders WHERE shopify_order_id = %s", (order_id,))
     order = cur.fetchone()
     if not order:
         cur.close()
-        return jsonify({"error": "Order not found"}), 404
+        raise InvoiceError("Order not found", 404)
 
     if order["bill_cancelled"]:
         cur.close()
-        return jsonify({"error": "This bill is marked Cancelled — restore it first to print"}), 400
+        raise InvoiceError("This bill is marked Cancelled — restore it first to print")
 
     # Staff can print the first copy of an invoice, but reprinting one
     # that's already been printed (a new invoice number is never issued
     # for it — see below) is an accounts/owner action only.
     if session.get("role") == "staff" and order["invoice_number"]:
         cur.close()
-        return jsonify({"error": "This invoice has already been printed — ask accounts or the owner to reprint it"}), 403
+        raise InvoiceError("This invoice has already been printed — ask accounts or the owner to reprint it", 403)
 
     cur.execute(
         "SELECT * FROM items WHERE shopify_order_id = %s ORDER BY sort_order",
@@ -1735,14 +1752,13 @@ def api_order_invoice(order_id):
     billing_items = [i for i in all_items if i["status"] in ("purchased", "stock")]
     if not closed or not billing_items:
         cur.close()
-        return jsonify({"error": "This order isn't in Billing yet."}), 400
+        raise InvoiceError("This order isn't in Billing yet.")
 
     # Same COD/Prepaid rule used by /api/orders — an explicit payment_type
     # (manually-entered orders) wins, otherwise derived from the shipping
     # charge against the threshold in Settings -> Schedule. Computed here,
     # before the invoice number, so COD orders get a COD/... number and
     # everything else keeps the SHP/... prefix.
-    cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
     payment_type = resolve_payment_type(order, cod_threshold) or "prepaid"
     invoice_prefix = "COD" if payment_type == "cod" else "SHP"
 
@@ -1762,7 +1778,7 @@ def api_order_invoice(order_id):
             ("invoice_seq_next", str(seq + 1)),
         )
         now = datetime.now()
-        invoice_date = now.strftime("%-d-%b-%y")
+        invoice_date = f"{now.day}-{now.strftime('%b-%y')}"  # same as %-d-%b-%y, but works on Windows too
         invoice_number = f"{invoice_prefix}/{seq}/{now.year}"
         cur.execute(
             "UPDATE orders SET invoice_number = %s, invoice_date = %s, invoice_printed_by = %s "
@@ -1845,7 +1861,20 @@ def api_order_invoice(order_id):
     db.commit()
     save_cur.close()
 
-    pdf_buf = build_invoice_pdf(order_dict, [dict(i) for i in billing_items], invoice_number, invoice_date)
+    return order_dict, [dict(i) for i in billing_items], invoice_number, invoice_date, is_first_print
+
+
+@app.route("/api/orders/<order_id>/invoice.pdf", methods=["GET"])
+@can_print_invoice_required
+def api_order_invoice(order_id):
+    db = get_db()
+    cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
+    try:
+        order_dict, billing_items, invoice_number, invoice_date, _ = _issue_invoice(db, order_id, cod_threshold)
+    except InvoiceError as e:
+        return jsonify({"error": e.message}), e.status
+
+    pdf_buf = build_invoice_pdf(order_dict, billing_items, invoice_number, invoice_date)
     filename = invoice_number.replace("/", "-") + ".pdf"
     response = send_file(pdf_buf, mimetype="application/pdf", as_attachment=False, download_name=filename)
     # So the frontend can flip the Printed/Not-Printed badge right away,
@@ -1855,6 +1884,89 @@ def api_order_invoice(order_id):
     response.headers["X-Invoice-Date"] = invoice_date
     response.headers["X-Invoice-Printed-By"] = session["name"]
     response.headers["Access-Control-Expose-Headers"] = "X-Invoice-Number, X-Invoice-Date, X-Invoice-Printed-By"
+    return response
+
+
+BULK_INVOICE_LIMIT = 200
+
+
+@app.route("/api/invoices/bulk.pdf", methods=["POST"])
+@accounts_or_owner_required
+def api_bulk_invoices():
+    """Many invoices in one PDF (Billing -> select orders -> PDF). Each order
+    goes through exactly the same steps as Print Invoice (_issue_invoice):
+    never-printed orders get their invoice number now, already-printed ones
+    are reprinted with their existing number. Orders that can't be invoiced
+    (bill cancelled, not in Billing...) are skipped and reported back."""
+    body = request.get_json(silent=True) or {}
+    raw_ids = body.get("order_ids") or []
+    if not isinstance(raw_ids, list):
+        return jsonify({"error": "order_ids must be a list"}), 400
+    order_ids = []
+    for oid in raw_ids:
+        oid = str(oid).strip()
+        if oid and oid not in order_ids:
+            order_ids.append(oid)
+    if not order_ids:
+        return jsonify({"error": "Select at least one order."}), 400
+    if len(order_ids) > BULK_INVOICE_LIMIT:
+        return jsonify({"error": f"Max {BULK_INVOICE_LIMIT} invoices per PDF — you selected {len(order_ids)}. "
+                                 f"Narrow it with the date or Invoice filter."}), 400
+
+    db = get_db()
+    # Oldest order first, so new invoice numbers follow the order sequence
+    # (same as printing them one by one from the oldest).
+    cur = db.cursor()
+    cur.execute(
+        "SELECT shopify_order_id FROM orders WHERE shopify_order_id = ANY(%s) "
+        "ORDER BY created_at ASC NULLS LAST, order_name ASC",
+        (order_ids,),
+    )
+    ordered = [r["shopify_order_id"] for r in cur.fetchall()]
+    cur.close()
+    ordered += [oid for oid in order_ids if oid not in ordered]  # unknown ids -> reported as skipped
+
+    cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
+    buf = io.BytesIO()
+    pdf = pdf_canvas.Canvas(buf, pagesize=A4)
+    printed, new_count, skipped = 0, 0, []
+    results = []  # [order_id, invoice_number] for each printed order -> screen updates instantly
+    for oid in ordered:
+        try:
+            order_dict, billing_items, invoice_number, invoice_date, is_first = _issue_invoice(db, oid, cod_threshold)
+        except InvoiceError as e:
+            skipped.append({"order_id": oid, "reason": e.message})
+            continue
+        build_invoice_pdf(order_dict, billing_items, invoice_number, invoice_date, c=pdf)
+        results.append([oid, invoice_number])
+        printed += 1
+        new_count += 1 if is_first else 0
+
+    if not printed:
+        reason = skipped[0]["reason"] if skipped else "Nothing to print."
+        return jsonify({"error": f"No invoice could be printed. {reason}", "skipped": skipped}), 400
+
+    pdf.save()
+    buf.seek(0)
+    filename = f"invoices-{datetime.now().strftime('%d-%b-%Y-%H%M')}-{printed}.pdf"
+    response = send_file(buf, mimetype="application/pdf", as_attachment=True, download_name=filename)
+    response.headers["X-Invoice-Count"] = str(printed)
+    response.headers["X-Invoice-New"] = str(new_count)
+    response.headers["X-Invoice-Skipped"] = str(len(skipped))
+    response.headers["X-Invoice-Results"] = quote(json.dumps(results, separators=(",", ":")))
+    response.headers["X-Invoice-Printed-By"] = quote(session["name"])
+    if skipped:
+        # Short readable summary for the toast (order names, first few only)
+        names = []
+        cur = db.cursor()
+        cur.execute("SELECT shopify_order_id, order_name FROM orders WHERE shopify_order_id = ANY(%s)",
+                    ([s["order_id"] for s in skipped],))
+        by_id = {r["shopify_order_id"]: r["order_name"] for r in cur.fetchall()}
+        cur.close()
+        for s in skipped[:5]:
+            names.append(f"{by_id.get(s['order_id']) or s['order_id']}: {s['reason']}")
+        response.headers["X-Invoice-Skipped-Info"] = quote(" | ".join(names))
+    response.headers["Access-Control-Expose-Headers"] = "X-Invoice-Count, X-Invoice-New, X-Invoice-Skipped, X-Invoice-Skipped-Info, X-Invoice-Results, X-Invoice-Printed-By"
     return response
 
 
@@ -2961,7 +3073,7 @@ def api_repurchase_invoice(batch_key):
         )
         now = datetime.now()
         invoice_number = f"RPR/{seq}/{now.year}"
-        invoice_date = now.strftime("%-d-%b-%y")
+        invoice_date = f"{now.day}-{now.strftime('%b-%y')}"  # same as %-d-%b-%y, but works on Windows too
         cur.execute(
             "UPDATE repurchases SET invoice_number = %s, invoice_date = %s, invoice_printed_by = %s "
             "WHERE COALESCE(batch, 'r' || id::text) = %s",

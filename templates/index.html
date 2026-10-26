@@ -142,6 +142,11 @@
             <label class="check-label tally-only-new" title="Skip invoices already exported, and mark these as exported. Auto-on when the Tally XML filter above is set to 'Not exported'.">
               <input id="tallyOnlyNew" type="checkbox"> Only new
             </label>
+            <span class="bulk-divider" aria-hidden="true"></span>
+            <label class="check-label bulk-select-all" title="Select every order shown below (max 200 per PDF)">
+              <input id="bulkSelectAll" type="checkbox"> Select all
+            </label>
+            <button id="bulkPdfBtn" class="btn btn-primary" type="button" disabled title="Download the selected orders' invoices as one PDF">PDF</button>
           </span>
         </div>
         <div class="field field-end">
