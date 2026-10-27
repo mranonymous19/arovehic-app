@@ -565,7 +565,29 @@ async function printInvoice(orderId, buttonEl, preOpenedTab) {
   }
 }
 
+// The list shows ORDERS_PAGE orders at first and adds the next ORDERS_PAGE as you
+// scroll down. Showing all 2000+ cards at once made the page huge (300k+ elements),
+// which can crash a Chrome tab. Search, filters, counts, Select all and PDF still
+// work on ALL orders — only the drawing on screen is done in steps.
+const ORDERS_PAGE = 100;
+let renderState = { orders: [], shown: 0 };
+let ordersMoreEl = null;
+let ordersMoreObserver = null;
+
 function renderOrders(orders) {
+  // Re-drawing the same list while scrolled down (e.g. after Print Invoice) keeps
+  // as many cards as before, so the page doesn't jump back up.
+  const keepShown = window.scrollY > ordersContainer.offsetTop ? renderState.shown : 0;
+  // Remember the order card at the top of the screen, to put it back in the same spot.
+  let anchor = null;
+  if (keepShown) {
+    for (const c of ordersContainer.children) {
+      if (!c.classList.contains("order-card")) continue;
+      const r = c.getBoundingClientRect();
+      if (r.bottom > 80) { anchor = { name: c.dataset.orderName, top: r.top }; break; }
+    }
+  }
+  renderState = { orders: [], shown: 0 };
   ordersContainer.innerHTML = "";
   lastRenderedOrders = orders;
   if (bulkAllMode) {
@@ -606,7 +628,56 @@ function renderOrders(orders) {
     return;
   }
 
-  for (const order of orders) {
+  renderState = { orders, shown: 0 };
+  appendOrderCards(Math.max(ORDERS_PAGE, Math.min(keepShown, orders.length)));
+  if (anchor && anchor.name) {
+    const same = ordersContainer.querySelector(`.order-card[data-order-name="${CSS.escape(anchor.name)}"]`);
+    if (same) {
+      const fix = () => { if (same.isConnected) window.scrollBy(0, same.getBoundingClientRect().top - anchor.top); };
+      fix();
+      // nearby cards settle to their real height over the next frames: correct again
+      requestAnimationFrame(() => { fix(); requestAnimationFrame(fix); });
+    }
+  }
+  updateBulkUI();
+}
+
+// Add the next `count` orders of the current list to the page.
+function appendOrderCards(count) {
+  const { orders } = renderState;
+  const end = Math.min(orders.length, renderState.shown + count);
+  const frag = document.createDocumentFragment();
+  for (let i = renderState.shown; i < end; i++) frag.appendChild(buildOrderCard(orders[i]));
+  if (ordersMoreEl && ordersMoreEl.parentNode === ordersContainer) ordersContainer.insertBefore(frag, ordersMoreEl);
+  else ordersContainer.appendChild(frag);
+  renderState.shown = end;
+  updateOrdersMore();
+}
+
+// "Showing 100 of 2783" line at the bottom; loads the next batch when it scrolls near.
+function updateOrdersMore() {
+  const total = renderState.orders.length, shown = renderState.shown;
+  if (shown >= total) {
+    if (ordersMoreEl) ordersMoreEl.remove();
+    return;
+  }
+  if (!ordersMoreEl) {
+    ordersMoreEl = document.createElement("div");
+    ordersMoreEl.className = "orders-more";
+    ordersMoreEl.innerHTML = '<span class="orders-more-text"></span><button type="button" class="btn btn-ghost btn-small orders-more-btn">Show more</button>';
+    ordersMoreEl.querySelector(".orders-more-btn").addEventListener("click", () => appendOrderCards(ORDERS_PAGE));
+    if ("IntersectionObserver" in window) {
+      ordersMoreObserver = new IntersectionObserver((entries) => {
+        if (entries.some((en) => en.isIntersecting)) appendOrderCards(ORDERS_PAGE);
+      }, { rootMargin: "1200px 0px" });
+    }
+  }
+  ordersMoreEl.querySelector(".orders-more-text").textContent = `Showing ${shown} of ${total} orders`;
+  if (ordersMoreEl.parentNode !== ordersContainer) ordersContainer.appendChild(ordersMoreEl);
+  if (ordersMoreObserver) { ordersMoreObserver.unobserve(ordersMoreEl); ordersMoreObserver.observe(ordersMoreEl); }
+}
+
+function buildOrderCard(order) {
     const card = document.createElement("div");
     card.className = "order-card" + (bulkSelected.has(order.order_id) ? " is-picked" : "");
     card.dataset.orderName = order.order_name || "";
@@ -775,9 +846,7 @@ function renderOrders(orders) {
       card.appendChild(renderItemRow(item));
     }
 
-    ordersContainer.appendChild(card);
-  }
-  updateBulkUI();
+    return card;
 }
 
 // Only accounts/owner, and only inside Billing — that's where invoices are

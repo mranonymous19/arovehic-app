@@ -328,11 +328,45 @@
     openPills = box;
   }
   // One listener for every status chip in the list (no per-item setup needed).
+  // Changes show instantly. If a save for the same item is still on its way, the new
+  // choice is NOT blocked: it shows at once and is sent right after the first save
+  // returns, so the last status you tapped is always the one that gets saved.
+  function startSave(box, pill, prev) {
+    box._saving = true; box._want = null;
+    box.classList.add('saving');
+    // Safety net: no reply at all (weak connection) -> stop waiting after 8 s
+    var unlock = setTimeout(function () { box._saving = false; box._want = null; box.classList.remove('saving'); }, 8000);
+    nextStatusSave = function (ok) {
+      clearTimeout(unlock);
+      var want = box._want;
+      box._saving = false; box._want = null;
+      box.classList.remove('saving');
+      if (!ok) {
+        // Server said no: show the status from before (app.js shows the error)
+        var cur = box.querySelector('.pill.active'); if (cur) cur.classList.remove('active');
+        if (prev) prev.classList.add('active');
+        return;
+      }
+      if (want && want !== pill && want.isConnected) {
+        // Runs right after app.js has marked `pill` as saved: send the newer choice
+        Promise.resolve().then(function () { box._replay = want; want.click(); });
+      }
+    };
+  }
   if (ordersRoot) {
     ordersRoot.addEventListener('click', function (e) {
       var pill = e.target.closest('.item-row .status-pills > .pill');
       if (!pill || pill.disabled) return;
       var box = pill.parentNode;
+      if (box._replay === pill) {
+        // Our own follow-up save of the newer choice: let app.js send it
+        box._replay = null;
+        var saved = box.querySelector('.pill.active');
+        if (saved && saved !== pill) saved.classList.remove('active');
+        pill.classList.add('active');
+        startSave(box, pill, saved);
+        return;
+      }
       var prev = box.querySelector('.pill.active');
       if (!prev) return; // nothing selected yet: all options show, normal behaviour
       if (pill === prev) {
@@ -342,16 +376,16 @@
         return;
       }
       if (!box.classList.contains('open')) { e.stopPropagation(); return; }
-      // New status picked: show it instantly; app.js saves it right after this.
-      // If the server says no, put the old status back (app.js shows the error).
       prev.classList.remove('active');
       pill.classList.add('active');
       closePills(box);
-      box.classList.add('saving');
-      nextStatusSave = function (ok) {
-        box.classList.remove('saving');
-        if (!ok) { pill.classList.remove('active'); prev.classList.add('active'); }
-      };
+      if (box._saving) {
+        // A save for this item is still on its way: show the new choice now, send it after
+        e.stopPropagation();
+        box._want = pill;
+        return;
+      }
+      startSave(box, pill, prev); // app.js sends this save right after this handler
     }, true);
   }
   document.addEventListener('mousedown', function (e) {
@@ -363,32 +397,14 @@
 
   var ordersBox = document.getElementById('ordersContainer');
   if (ordersBox) {
-    // Cards on screen get their "More" menu right away; the rest in small background
-    // batches, so a list of 2000+ orders doesn't block the click that loaded it.
-    var queue = [], qTimer = null;
-    function runQueue() {
-      qTimer = null;
-      var t0 = performance.now();
-      while (queue.length && performance.now() - t0 < 8) enhanceHead(queue.shift());
-      if (queue.length) qTimer = setTimeout(runQueue, 16);
-    }
+    // Every batch of cards (100 at a time) gets its "More" menu in the same moment it is
+    // drawn — before the screen updates — and nothing changes in the background after
+    // that. (A background queue that kept hiding/showing buttons made iPhone Safari
+    // treat taps as "hover" and cancel them, so the page looked frozen.)
     new MutationObserver(function () {
       var heads = ordersBox.getElementsByClassName('order-head');
-      queue = [];
-      for (var i = 0; i < heads.length; i++) if (!heads[i].hasAttribute('data-enhanced')) queue.push(heads[i]);
-      for (var k = 0; k < 12 && queue.length; k++) enhanceHead(queue.shift()); // top of the list now
-      if (queue.length && !qTimer) qTimer = setTimeout(runQueue, 16);
+      for (var i = 0; i < heads.length; i++) if (!heads[i].hasAttribute('data-enhanced')) enhanceHead(heads[i]);
     }).observe(ordersBox, { childList: true });
-    // A card scrolled into view (or touched) before its batch ran: do it now.
-    document.addEventListener('contentvisibilityautostatechange', function (e) {
-      if (!e.skipped && e.target.classList && e.target.classList.contains('order-card')) {
-        var h = e.target.querySelector('.order-head'); if (h) enhanceHead(h);
-      }
-    }, true);
-    ordersBox.addEventListener('pointerover', function (e) {
-      var c = e.target.closest && e.target.closest('.order-card');
-      if (c) { var h = c.querySelector('.order-head:not([data-enhanced])'); if (h) enhanceHead(h); }
-    });
   }
   document.addEventListener('mousedown', function (e) {
     if (openRow && !e.target.closest('.row-menu')) closeRow();
