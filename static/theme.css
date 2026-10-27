@@ -71,6 +71,7 @@ button:focus-visible,a:focus-visible{box-shadow:0 0 0 3px var(--brand-ring)}
 #settingsBtn{--ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23f0771f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1'/%3E%3Ccircle cx='15' cy='6' r='2'/%3E%3Ccircle cx='9' cy='12' r='2'/%3E%3Ccircle cx='17' cy='18' r='2'/%3E%3C/svg%3E")}
 #usersBtn{--ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23f0771f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='9' cy='8' r='4'/%3E%3Cpath d='M2 21a7 7 0 0 1 14 0'/%3E%3Cpath d='M16 4.5a4 4 0 0 1 0 7'/%3E%3Cpath d='M22 21a7 7 0 0 0-4.5-6.5'/%3E%3C/svg%3E")}
 #activityLogBtn{--ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23f0771f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 7v5l3 2'/%3E%3C/svg%3E")}
+#riskBtn{--ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23f0771f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z'/%3E%3Cpath d='M12 9v4M12 17h.01'/%3E%3C/svg%3E")}
 #accountBtn{--ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23f0771f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='8' r='4'/%3E%3Cpath d='M4 21a8 8 0 0 1 16 0'/%3E%3C/svg%3E")}
 .menu-item.danger{--ic:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23dc2626' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4'/%3E%3Cpath d='m16 17 5-5-5-5'/%3E%3Cpath d='M21 12H9'/%3E%3C/svg%3E")}
 
@@ -294,7 +295,7 @@ main#ordersContainer{display:flex;flex-direction:column;gap:12px;padding:0}
 #bulkPdfBtn{min-width:76px}
 
 /* Item rows */
-.item-row{grid-template-columns:minmax(0,1fr) auto auto;gap:16px;padding:12px 20px;border-bottom:0;border-top:1px solid var(--s100);transition:background-color .15s}
+.item-row{grid-template-columns:minmax(0,1fr) auto;gap:16px;padding:12px 20px;border-bottom:0;border-top:1px solid var(--s100);transition:background-color .15s}
 .order-head + .item-row{border-top:0}
 .item-row:hover{background:var(--row-hover)}
 .item-title{font-size:14px;font-weight:500;color:var(--ink)}
@@ -341,10 +342,12 @@ main#ordersContainer{display:flex;flex-direction:column;gap:12px;padding:0}
 .empty-state::before{content:"";display:block;width:56px;height:56px;margin:0 auto 14px;border-radius:16px;background:var(--t-green-50) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23059669' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center/26px no-repeat}
 .empty-state.empty-search::before{background:var(--s100) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E") center/24px no-repeat}
 .empty-state:has(.load-bar)::before{display:none}
+.empty-state.empty-error::before{background:var(--t-red-50,#fef2f2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23dc2626' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z'/%3E%3Cpath d='M12 9v4M12 17h.01'/%3E%3C/svg%3E") center/26px no-repeat}
 .empty-state .glyph{font-family:Inter,sans-serif;font-size:15px;font-weight:700;color:var(--ink);margin-bottom:4px}
 .empty-state p{margin:0;font-size:14px}
 .load-bar{height:6px;width:min(320px,70%);margin:14px auto 0;border-radius:6px;background:var(--s100);overflow:hidden}
 .load-bar-fill{height:100%;width:0;border-radius:6px;background:var(--brand);transition:width .25s ease}
+.load-bar-fill.load-bar-indeterminate{width:35%;animation:loadSlide 1.1s ease-in-out infinite}
 .empty-log{color:var(--muted);font-size:13.5px;padding:24px 4px;text-align:center}
 
 /* ---------- 9. Popups ---------- */
@@ -437,6 +440,64 @@ main#ordersContainer{display:flex;flex-direction:column;gap:12px;padding:0}
 .summary-order-chip:hover,.summary-order-chip:focus-visible{background:var(--t-indigo-700);color:#fff}
 .summary-order-list-empty{font-size:12.5px;color:var(--muted)}
 
+/* Risk page (Menu -> Risk, address #risk) */
+.view-risk .page > .filter-card,.view-risk #ordersContainer,.view-risk #billingResultCount{display:none!important}
+.risk-view{display:flex;flex-direction:column;gap:12px}
+.risk-view[hidden]{display:none}
+/* Risk page header: count pill + Refresh (only on this page) */
+.risk-only{display:none}
+.view-risk .risk-only:not(:empty){display:inline-flex}
+.risk-refresh{margin-left:auto;height:36px;gap:6px}
+.risk-refresh svg{width:15px;height:15px}
+/* Risk filter card: View + Delay days */
+.risk-filter{background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:var(--card-shadow)}
+.risk-filter-body{display:flex;flex-wrap:wrap;align-items:flex-end;gap:14px 20px;padding:18px 20px}
+.risk-filter-body .dd-btn{min-width:220px}
+.risk-refresh.is-busy svg{animation:riskSpin .8s linear infinite}
+@keyframes riskSpin{to{transform:rotate(360deg)}}
+.risk-search-field{flex:0 1 280px}
+.risk-search-field input{height:42px}
+.dd-footer{position:sticky;bottom:-5px;margin:5px -5px -5px;padding:10px 12px 12px;background:var(--surface);border-top:1px solid var(--line)}
+.risk-range-title{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+.risk-range{display:flex;align-items:center;gap:8px}
+.risk-range input[type=number]{flex:1 1 0;width:0;min-width:0;height:38px;text-align:center;-moz-appearance:textfield}
+.risk-range input[type=number]::-webkit-inner-spin-button,.risk-range input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+.risk-range-to{font-size:13px;font-weight:600;color:var(--muted)}
+.risk-range-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}
+.risk-tabs .filter-btn{display:inline-flex;align-items:center;gap:2px}
+.risk-count{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;margin-left:6px;padding:0 6px;border-radius:999px;background:var(--t-amber-100);color:var(--t-amber-800);font-size:11.5px;font-weight:700}
+#riskList{display:flex;flex-direction:column;gap:12px}
+.risk-card{background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:var(--card-shadow);overflow:hidden}
+.risk-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:14px 20px;border-bottom:1px solid var(--s100)}
+.risk-head .order-name{font-family:var(--mono);font-size:14.5px;font-weight:600;color:var(--ink)}
+.risk-head .customer{font-size:14px;font-weight:600;color:var(--s700)}
+.risk-head-end{display:inline-flex;align-items:center;gap:10px;margin-left:auto;flex:none}
+.risk-item{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 20px;border-top:1px solid var(--s100)}
+.risk-head + .risk-item{border-top:0}
+.risk-item-main{min-width:0}
+.risk-delay{flex:none;font-size:13px;color:var(--muted);white-space:nowrap}
+.risk-side{flex:none;display:flex;align-items:center;gap:12px}
+.risk-status{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:6px;font-size:12px;font-weight:600;background:var(--s100);color:var(--s600);white-space:nowrap}
+.risk-status-pending{background:var(--t-amber-50);color:var(--t-amber-700)}
+.risk-status-purchased{background:var(--t-green-50);color:var(--t-green-700)}
+.risk-status-stock{background:var(--t-blue-50);color:var(--t-blue-700)}
+.risk-status-refunded{background:var(--t-red-50);color:var(--t-red-700)}
+.risk-status-wait{background:var(--t-violet-50);color:var(--t-violet-700)}
+.risk-delay b{color:var(--ink);font-size:14px}
+.risk-delay-high b{color:var(--t-red-600)}
+.risk-count-danger{background:var(--t-red-50);color:var(--t-red-700)}
+.risk-card-danger{border-left:3px solid var(--t-red-600)}
+.risk-card:not(.risk-card-danger){border-left:3px solid #f59e0b}
+@media(max-width:640px){
+  .risk-filter-body{flex-direction:column;align-items:stretch;padding:16px}
+  .risk-filter-body .field{width:100%}
+  .risk-filter-body .dd-btn{min-width:0;width:100%}
+  .risk-tabs{display:flex}
+  .risk-tabs .filter-btn{flex:1 1 0;justify-content:center}
+  .risk-head{padding:12px 16px}
+  .risk-item{flex-direction:column;align-items:flex-start;gap:6px;padding:12px 16px}
+}
+
 /* Repurchase */
 .rp-group{margin:10px 0;padding:2px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
 .rp-group-head{padding:10px 0;border-bottom:1px solid var(--s100);font-size:14px}
@@ -520,15 +581,9 @@ main#ordersContainer{display:flex;flex-direction:column;gap:12px;padding:0}
 .theme-toggle[aria-checked="true"] .switch::after{transform:translateX(16px)}
 
 /* ---------- Speed ---------- */
-/* Off-screen order cards are skipped by the browser, so a click only re-checks the few cards
-   you can see instead of all 2000+ (clicks went from ~1s to ~30ms with 2800 orders). */
-.order-card{content-visibility:auto;contain-intrinsic-size:auto 260px}
-.order-card.menu-open{content-visibility:visible;contain:none;z-index:5;position:relative}
-/* iPhone/iPad Safari: skip this optimisation there — Safari can freeze taps on long
-   lists with it, and the list only draws 100 orders at a time anyway. */
-@supports (-webkit-touch-callout:none){
-  .order-card{content-visibility:visible;contain-intrinsic-size:none}
-}
+/* The list draws 100 orders at a time, so cards are drawn normally (content-visibility
+   was removed: it made Chrome crash with STATUS_BREAKPOINT when the More menu closed). */
+.order-card.menu-open{z-index:5;position:relative}
 /* Instant feedback while a list reload is on its way from the server */
 /* Dark mode switch: change colours in one go, without animating every element */
 .theme-switching *,.theme-switching *::before,.theme-switching *::after{transition:none!important}

@@ -455,6 +455,7 @@
         '" data-value="' + o.value.replace(/"/g, '&quot;') + '"><span class="dd-text"></span>' + (on ? checkSvg : '') + '</div>';
     }
     ddPanel.innerHTML = html;
+    if (sel._ddFooter) ddPanel.appendChild(sel._ddFooter); // e.g. Risk "Custom range" box
     var spans = ddPanel.querySelectorAll('.dd-text'), k = 0;
     for (var j = 0; j < sel.options.length; j++) {
       if (sel.options[j].hidden || sel.options[j].disabled) continue;
@@ -499,7 +500,8 @@
     if (cur) cur.classList.remove('focus');
     n.classList.add('focus'); n.scrollIntoView({ block: 'nearest' });
   }
-  ddPanel.addEventListener('mousedown', function (e) { e.preventDefault(); }); // keep focus on the button
+  function inFooter(el) { return !!(el && el.closest && el.closest('.dd-footer')); }
+  ddPanel.addEventListener('mousedown', function (e) { if (!inFooter(e.target)) e.preventDefault(); }); // keep focus on the button
   ddPanel.addEventListener('click', function (e) {
     var item = e.target.closest('.dd-item'); if (item && ddOpen) ddPick(item);
   });
@@ -514,11 +516,13 @@
   document.addEventListener('keydown', function (e) {
     if (ddOpen && e.key === 'Escape') { e.stopImmediatePropagation(); ddClose(true); }
   }, true);
-  window.addEventListener('resize', function () { ddClose(); });
+  // (Typing in a footer box opens the phone keyboard, which resizes/scrolls the page — keep it open then.)
+  window.addEventListener('resize', function () { if (!inFooter(document.activeElement)) ddClose(); });
   document.addEventListener('scroll', function (e) {
-    if (ddOpen && e.target !== ddPanel) ddClose();
+    if (ddOpen && e.target !== ddPanel && !inFooter(document.activeElement)) ddClose();
   }, true);
 
+  window.heroDdClose = function () { ddClose(); };
   function ddEnhance(sel) {
     if (sel._ddBtn || sel.multiple) return;
     var btn = document.createElement('button');

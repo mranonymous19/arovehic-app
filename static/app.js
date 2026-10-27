@@ -148,6 +148,8 @@ async function loadMe() {
   // arrived/pending breakdown isn't meaningful there, so the Summary
   // button is only shown to the roles that see the full order flow.
   summaryBtn.hidden = !(isOwner || currentRole === "staff" || currentRole === "telecaller");
+  const riskBtnEl = document.getElementById("riskBtn");
+  if (riskBtnEl) riskBtnEl.hidden = !(isOwner || currentRole === "telecaller");
   // Telecaller is otherwise view-only everywhere (every edit endpoint is
   // gated server-side too), but gets the same visibility as the owner so
   // they can pull up any order's full status while on a call.
@@ -408,7 +410,7 @@ function goToOrder(orderName) {
   orderTrackQuery = orderName;
   orderTrackInput.value = orderName;
 
-  loadOrders().then(() => {
+  const jump = () => {
     const card = ordersContainer.querySelector(
       `.order-card[data-order-name="${CSS.escape(orderName)}"]`
     );
@@ -417,7 +419,26 @@ function goToOrder(orderName) {
       card.classList.add("order-card-jumped");
       setTimeout(() => card.classList.remove("order-card-jumped"), 2000);
     }
-  });
+  };
+  // Fast path: ask the server for just this one order and show it straight away,
+  // then load the full list quietly in the background (needed when the search is
+  // cleared). The list is only redrawn if the search finds more orders than shown.
+  const seq = ++loadOrdersSeq;
+  fetchOrders({ order_name: orderName })
+    .then((one) => {
+      if (seq !== loadOrdersSeq) return;
+      if (!Array.isArray(one.data) || !one.data.length) throw new Error("not found");
+      lastLoadedOrders = one.data;
+      renderOrders(filterByTrackQuery(one.data));
+      jump();
+      return fetchOrders().then((all) => {
+        if (seq !== loadOrdersSeq || !Array.isArray(all.data)) return;
+        lastLoadedOrders = all.data;
+        const matches = filterByTrackQuery(all.data);
+        if (matches.length !== one.data.length) renderOrders(matches);
+      });
+    })
+    .catch(() => { if (seq === loadOrdersSeq) loadOrders().then(jump); });
 }
 
 summaryViewOrdersButtons.forEach((btn) => {
@@ -494,7 +515,7 @@ orderTrackInput.addEventListener("input", () => {
   orderTrackDebounce = setTimeout(() => {
     orderTrackQuery = orderTrackInput.value;
     renderOrders(filterByTrackQuery(lastLoadedOrders));
-  }, 200);
+  }, 120);
 });
 
 async function deleteOrder(orderId, orderName) {
@@ -569,7 +590,9 @@ async function printInvoice(orderId, buttonEl, preOpenedTab) {
 // scroll down. Showing all 2000+ cards at once made the page huge (300k+ elements),
 // which can crash a Chrome tab. Search, filters, counts, Select all and PDF still
 // work on ALL orders — only the drawing on screen is done in steps.
-const ORDERS_PAGE = 100;
+// 30 (was 100): every search / filter / reload redraws ~3x faster, and the next 30
+// are added automatically well before you scroll to the bottom.
+const ORDERS_PAGE = 30;
 let renderState = { orders: [], shown: 0 };
 let ordersMoreEl = null;
 let ordersMoreObserver = null;
@@ -1097,17 +1120,6 @@ function renderItemRow(item) {
 
   const editable = canEditStatus();
 
-  const purchaseBlock = document.createElement("div");
-  purchaseBlock.className = "purchase-amount-block";
-  if (editable) {
-    purchaseBlock.innerHTML = `<input type="number" step="0.01" min="0" class="purchase-amount-input" placeholder="Amount ₹" value="${item.purchase_amount ? Number(item.purchase_amount) : ""}" />`;
-    const input = purchaseBlock.querySelector("input");
-    input.addEventListener("blur", () => updatePurchaseAmount(item.id, input.value, input));
-  } else {
-    const amount = item.purchase_amount ? "₹" + Number(item.purchase_amount) : "—";
-    purchaseBlock.innerHTML = `<div class="purchase-amount-readonly">${amount}</div>`;
-  }
-
   const pills = document.createElement("div");
   pills.className = "status-pills";
   for (const status of Object.keys(STATUS_LABELS)) {
@@ -1127,7 +1139,6 @@ function renderItemRow(item) {
   }
 
   row.appendChild(titleBlock);
-  row.appendChild(purchaseBlock);
   row.appendChild(pills);
   return row;
 }
@@ -1197,20 +1208,6 @@ async function updateBillCancelled(orderId, cancelled, reason) {
   }
   renderOrders(filterByTrackQuery(lastLoadedOrders));
   showMessage(cancelled ? "Bill cancelled — it won't be in the Tally export" : "Bill restored");
-}
-
-async function updatePurchaseAmount(itemId, value, inputEl) {
-  const res = await fetch(`/api/items/${encodeURIComponent(itemId)}/purchase-amount`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ purchase_amount: value || 0 }),
-  });
-  if (!res.ok) {
-    showMessage("Could not save purchase amount.", true);
-    return;
-  }
-  const data = await res.json();
-  inputEl.value = data.purchase_amount ? Number(data.purchase_amount) : "";
 }
 
 async function updateStatus(itemId, status, rowEl) {
@@ -2361,6 +2358,346 @@ async function fetchOrdersWithProgress() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Risk (Menu -> Risk): its own page inside the app (address ends in #risk)
+//   Risk:   arrived 48+ hours ago, some items done but at least one still Pending
+//   Danger: closed (no item Pending) but the order is not packed yet
+// The menu item and the page section are created here if the page doesn't have
+// them, so an older cached index.html can never stop the rest of the app loading.
+// ---------------------------------------------------------------------------
+function ensureRiskUI() {
+  let btn = document.getElementById("riskBtn");
+  if (!btn) {
+    btn = document.createElement("button");
+    btn.type = "button";
+    btn.id = "riskBtn";
+    btn.className = "menu-item";
+    btn.setAttribute("role", "menuitem");
+    btn.dataset.hint = "Orders running late";
+    btn.hidden = true;
+    btn.textContent = "Risk";
+    const before = document.getElementById("activityLogBtn");
+    if (before && before.parentNode) before.parentNode.insertBefore(btn, before);
+  }
+  let view = document.getElementById("riskView");
+  if (!view) {
+    view = document.createElement("section");
+    view.id = "riskView";
+    view.className = "risk-view";
+    view.hidden = true;
+    view.setAttribute("aria-label", "Risk");
+    view.innerHTML = `
+      <div class="risk-filter">
+        <div class="risk-filter-body">
+          <div class="field">
+            <span class="date-filter-label">View</span>
+            <div class="segmented risk-tabs" role="tablist">
+              <button type="button" class="filter-btn active" data-risk="risk">Risk <span class="risk-count" id="riskRiskCount">…</span></button>
+              <button type="button" class="filter-btn" data-risk="danger">Danger <span class="risk-count risk-count-danger" id="riskDangerCount">…</span></button>
+            </div>
+          </div>
+          <div class="field">
+            <label class="date-filter-label" for="riskDaysSelect">Delay days</label>
+            <select id="riskDaysSelect"><option value="">All</option></select>
+          </div>
+          <div class="field risk-search-field">
+            <label class="date-filter-label" for="riskSearch">Order ID</label>
+            <input id="riskSearch" type="search" inputmode="search" autocomplete="off" placeholder="Search order ID, e.g. 7257">
+          </div>
+        </div>
+      </div>
+      <div id="riskList"></div>`;
+    ordersContainer.parentNode.insertBefore(view, ordersContainer.nextSibling);
+  }
+  // Page header (next to the "Risk" title): count pill + Refresh, shown only on this page
+  const header = document.getElementById("heroBanner");
+  if (header && !document.getElementById("riskCountPill")) {
+    const pill = document.createElement("span");
+    pill.id = "riskCountPill";
+    pill.className = "billing-result-count risk-only";
+    const refresh = document.createElement("button");
+    refresh.type = "button";
+    refresh.id = "riskRefreshBtn";
+    refresh.className = "btn btn-ghost risk-only risk-refresh";
+    refresh.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5"/><path d="M3 21v-5h5"/></svg>Refresh';
+    header.append(pill, refresh);
+  }
+  return [btn, view];
+}
+const [riskBtn, riskView] = ensureRiskUI();
+let riskData = null;
+let riskTab = "risk";
+const RISK_PAGE = 30;  // cards drawn at a time (Danger can be a long list) — small = fast on phones
+let riskRows = [];     // the filtered list currently on screen (for "Show more")
+let riskShown = RISK_PAGE;
+// Delay days filter — one choice shared by both tabs, so the Risk and Danger counts both follow it
+const riskDaysFilter = { all: "" };  // "" = all, else exact Delay Days
+const riskRange = { all: { from: "", to: "" } };  // Custom range (e.g. 1 to 10)
+let riskSearch = "";  // Order ID search (digits/letters, "#" ignored)
+let riskOpen = false;
+const VIEW_TITLES = { "": "Order desk", billing: "Billing", trash: "Trash", cancelled: "Cancelled orders" };
+
+function riskDate(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  return d.toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata", day: "numeric", month: "short", year: "numeric",
+    hour: "numeric", minute: "2-digit", hour12: true,
+  });
+}
+
+// Each card's HTML is built once per load and reused — switching tabs, filtering and
+// searching then only joins ready-made strings instead of rebuilding every card.
+function riskCardHtml(o, isRisk) {
+  return o._html || (o._html = riskCardBuild(o, isRisk));
+}
+function riskMoreHtml(shown, total) {
+  return shown < total
+    ? `<div class="orders-more"><span class="orders-more-text">Showing ${shown} of ${total} orders</span><button type="button" class="btn btn-ghost btn-small risk-more">Show more</button></div>`
+    : "";
+}
+function riskCardBuild(o, isRisk) {
+  const pay = o.payment_type
+    ? `<span class="payment-badge payment-badge-${o.payment_type}">${o.payment_type === "cod" ? "COD" : "Prepaid"}</span>` : "";
+  const arrived = `<span class="invoice-badge arrived-date-badge">Arrived · ${escapeHtml(riskDate(o.created_at))}</span>`;
+  const closed = isRisk ? "" : `<span class="invoice-badge billed-date-badge">Closed · ${escapeHtml(riskDate(o.since))}</span>`;
+  const inv = (!isRisk && o.invoice_number) ? `<span class="invoice-badge invoice-badge-printed">Invoice ${escapeHtml(o.invoice_number)}</span>` : "";
+  const who = o.assigned_to ? `<span class="assigned-to">Assigned: ${escapeHtml(o.assigned_to)}</span>` : "";
+  const high = o.delay_days >= (isRisk ? 4 : 2) ? " risk-delay-high" : "";
+  const delay = `<span class="risk-delay${high}">Delay Days: <b>${o.delay_days}</b></span>`;
+  const items = o.items.map((i) => `
+    <div class="risk-item">
+      <div class="risk-item-main">
+        <div class="item-title">${escapeHtml(i.title || "")}${i.variant_title ? ` — ${escapeHtml(i.variant_title)}` : ""}</div>
+        <div class="item-meta">qty ${i.quantity} · ${escapeHtml(i.price || "")}${i.vendor ? " · " + escapeHtml(i.vendor) : ""}</div>
+      </div>
+      <div class="risk-side">
+        <span class="risk-status risk-status-${escapeHtml(i.status || "")}">${escapeHtml(STATUS_LABELS[i.status] || i.status || "")}</span>
+      </div>
+    </div>`).join("");
+  return `
+    <div class="risk-card${isRisk ? "" : " risk-card-danger"}">
+      <div class="risk-head">
+        <span class="order-name">${escapeHtml(o.order_name || o.order_id)}</span>
+        <span class="customer">${escapeHtml(o.customer_name || "")}</span>
+        ${pay}${arrived}${closed}${inv}${who}
+        <span class="risk-head-end">
+          ${delay}
+          <button type="button" class="btn btn-ghost btn-small risk-open" data-order-name="${escapeHtml(o.order_name || "")}">Open</button>
+        </span>
+      </div>
+      ${items}
+    </div>`;
+}
+
+function renderRisk() {
+  const list = document.getElementById("riskList");
+  riskView.querySelectorAll(".risk-tabs .filter-btn").forEach((b) => b.classList.toggle("active", b.dataset.risk === riskTab));
+  if (!riskData) {
+    const cp = document.getElementById("riskCountPill"); if (cp) cp.textContent = "";
+    list.innerHTML = `<div class="empty-state"><div class="glyph">Loading Risk…</div><p>Checking every open order — this can take a few seconds.</p><div class="load-bar"><div class="load-bar-fill load-bar-indeterminate"></div></div></div>`;
+    return;
+  }
+  const isRisk = riskTab === "risk";
+  const allRows = isRisk ? riskData.risk : riskData.danger;
+  // Delay days filter: options = the day values present in this tab, with counts
+  const sel = document.getElementById("riskDaysSelect");
+  const perDay = new Map();
+  for (const o of allRows) perDay.set(o.delay_days, (perDay.get(o.delay_days) || 0) + 1);
+  const days = [...perDay.keys()].sort((a, b) => a - b);
+  const want = riskDaysFilter.all;
+  // The chosen day may not exist in this tab — still list it (with 0) so the choice stays
+  if (want !== "" && !perDay.has(Number(want))) { perDay.set(Number(want), 0); days.push(Number(want)); days.sort((a, b) => a - b); }
+  const optsHtml = `<option value="">All (${allRows.length})</option>` +
+    days.map((d) => `<option value="${d}">${d === 0 ? "Today" : `${d} day${d === 1 ? "" : "s"}`} (${perDay.get(d)})</option>`).join("");
+  // Custom range (e.g. 1 to 10) from the box inside the Delay days dropdown
+  const rg = riskRange.all;
+  const hasRange = rg.from !== "" || rg.to !== "";
+  let lo = rg.from === "" ? -Infinity : Number(rg.from);
+  let hi = rg.to === "" ? Infinity : Number(rg.to);
+  if (lo > hi) [lo, hi] = [hi, lo];  // typed backwards (10 to 1) still works
+  const q = riskSearch.replace(/^#/, "").trim().toLowerCase();
+  const idOk = (o) => !q || o._key.includes(q);
+  const dayOk = want !== ""
+    ? (o) => o.delay_days === Number(want)
+    : (o) => o.delay_days >= lo && o.delay_days <= hi;
+  const keep = (o) => idOk(o) && dayOk(o);
+  const rows = allRows.filter(keep);
+  // Tab counts follow the Delay days choice
+  document.getElementById("riskRiskCount").textContent = isRisk ? rows.length : riskData.risk.filter(keep).length;
+  document.getElementById("riskDangerCount").textContent = isRisk ? riskData.danger.filter(keep).length : rows.length;
+  const filtered = want !== "" || hasRange || !!q;
+  if (sel) {
+    // A hidden "range" option makes the dropdown button read e.g. "1 to 10 days (4)"
+    const rangeText = lo === -Infinity ? `${hi} day${hi === 1 ? "" : "s"} or less`
+      : hi === Infinity ? `${lo}+ days` : `${lo} to ${hi} days`;
+    const rangeOpt = hasRange ? `<option value="range" hidden>${rangeText} (${rows.length})</option>` : "";
+    const full = optsHtml + rangeOpt;
+    if (sel.dataset.opts !== full) { sel.innerHTML = full; sel.dataset.opts = full; }
+    sel.value = hasRange ? "range" : want;
+    const f = document.getElementById("riskRangeFrom"), t = document.getElementById("riskRangeTo");
+    if (f) f.value = rg.from;
+    if (t) t.value = rg.to;
+  }
+  const countPill = document.getElementById("riskCountPill");
+  if (countPill) countPill.textContent = rows.length === 1 ? "1 order" : `${rows.length} orders`;
+  if (!rows.length) {
+    list.innerHTML = filtered && allRows.length
+      ? `<div class="empty-state empty-search"><div class="glyph">${q ? "No matching order" : "No orders in this range"}</div><p>${q ? `No ${isRisk ? "Risk" : "Danger"} order matches “${escapeHtml(riskSearch.trim())}”.` : "Try other delay days."}</p></div>`
+      : `<div class="empty-state"><div class="glyph">All caught up</div><p>${isRisk ? "No partly done order is stuck on a Pending item." : "Every closed order is packed."}</p></div>`;
+    return;
+  }
+  const shown = Math.min(riskShown, rows.length);
+  riskRows = rows;
+  list.innerHTML = rows.slice(0, shown).map((o) => riskCardHtml(o, isRisk)).join("") + riskMoreHtml(shown, rows.length);
+}
+
+// "Show more": add only the next cards below (the ones already drawn stay as they are)
+function riskShowMore() {
+  const list = document.getElementById("riskList");
+  const from = Math.min(riskShown, riskRows.length);
+  riskShown += RISK_PAGE;
+  const to = Math.min(riskShown, riskRows.length);
+  const isRisk = riskTab === "risk";
+  list.querySelector(".orders-more")?.remove();
+  list.insertAdjacentHTML("beforeend",
+    riskRows.slice(from, to).map((o) => riskCardHtml(o, isRisk)).join("") + riskMoreHtml(to, riskRows.length));
+}
+
+// Prepare a fresh /api/risk answer once: search key per order (no work while typing)
+function riskPrepare(data) {
+  for (const o of data.risk.concat(data.danger)) {
+    o._key = String(o.order_name || o.order_id || "").replace(/^#/, "").toLowerCase();
+  }
+  return data;
+}
+
+let riskLoading = false;
+async function loadRisk() {
+  if (riskLoading) return;
+  riskLoading = true;
+  // Opening Risk again (or Refresh) keeps the last list on screen while the new one
+  // loads, so the page shows instantly; only the very first open shows the loading bar.
+  const refreshBtn = document.getElementById("riskRefreshBtn");
+  if (refreshBtn) { refreshBtn.disabled = true; refreshBtn.classList.add("is-busy"); }
+  if (!riskData) { riskShown = RISK_PAGE; renderRisk(); }
+  try {
+    const res = await fetch("/api/risk");
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok && riskData) { showMessage(data.error || "Could not refresh Risk — showing the last list.", true); return; }
+    if (!res.ok) {
+      document.getElementById("riskList").innerHTML = `<div class="empty-state empty-error"><div class="glyph">Risk unavailable</div><p>${escapeHtml(res.status === 404
+        ? "The server is still running the old app.py (no /api/risk). Copy the new app.py and restart the app."
+        : (data.error || "Could not load Risk."))}</p></div>`;
+      return;
+    }
+    riskData = riskPrepare(data);
+    if (riskOpen) renderRisk();
+  } catch (err) {
+    if (!riskData) document.getElementById("riskList").innerHTML = `<div class="empty-state empty-error"><div class="glyph">Risk unavailable</div><p>Could not reach the server.</p></div>`;
+    else showMessage("Could not refresh Risk — showing the last list.", true);
+  } finally {
+    riskLoading = false;
+    if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.classList.remove("is-busy"); }
+  }
+}
+
+// Open the Risk page (pushHistory=false when opened from the address / Back button)
+function showRiskPage(pushHistory = true) {
+  if (!riskBtn || riskBtn.hidden) return; // only roles that may see Risk
+  riskOpen = true;
+  document.body.classList.add("view-risk");
+  riskView.hidden = false;
+  const title = document.getElementById("heroTitle");
+  if (title) title.textContent = "Risk";
+  document.querySelectorAll(".bottom-nav .nav-item").forEach((b) => b.classList.remove("is-active"));
+  if (pushHistory && location.hash !== "#risk") history.pushState({ risk: true }, "", "#risk");
+  window.scrollTo(0, 0);
+  loadRisk();
+}
+
+// Back to the normal order list (fromHistory=true when the Back button did it)
+function hideRiskPage(fromHistory = false) {
+  if (!riskOpen) return;
+  riskOpen = false;
+  document.body.classList.remove("view-risk");
+  riskView.hidden = true;
+  const title = document.getElementById("heroTitle");
+  if (title) title.textContent = VIEW_TITLES[currentFilter] || (currentFilter === "billing" ? "Billing" : "Order desk");
+  const key = currentFilter === "trash" || currentFilter === "cancelled" || currentFilter === "billing" ? currentFilter : "";
+  const navId = { "": "navOrders", billing: "navBilling", trash: "trashBtn", cancelled: "cancelledBtn" }[key];
+  document.querySelectorAll(".bottom-nav .nav-item").forEach((b) => b.classList.toggle("is-active", b.id === navId));
+  if (!fromHistory && location.hash === "#risk") history.replaceState(null, "", location.pathname + location.search);
+}
+
+riskBtn?.addEventListener("click", () => showRiskPage());
+document.getElementById("riskRefreshBtn")?.addEventListener("click", () => loadRisk());
+riskView?.addEventListener("click", (e) => {
+  const tab = e.target.closest(".risk-tabs .filter-btn");
+  if (tab) { riskTab = tab.dataset.risk; riskShown = RISK_PAGE; renderRisk(); return; }
+  if (e.target.closest(".risk-more")) { riskShowMore(); return; }
+  const open = e.target.closest(".risk-open");
+  if (open && open.dataset.orderName) { hideRiskPage(); goToOrder(open.dataset.orderName); window.scrollTo(0, 0); return; }
+
+});
+// Any bottom-nav view (Orders, Billing, Cancelled, Trash) or the Status filter leaves Risk
+document.querySelector(".bottom-nav")?.addEventListener("click", (e) => {
+  const item = e.target.closest(".nav-item");
+  if (item && item.id !== "repurchaseBtn") hideRiskPage();
+}, true);
+statusFilterSelect.addEventListener("change", () => hideRiskPage());
+window.addEventListener("popstate", () => {
+  if (location.hash === "#risk") showRiskPage(false); else hideRiskPage(true);
+});
+document.getElementById("riskDaysSelect")?.addEventListener("change", (e) => {
+  if (e.target.value === "range") return;
+  riskDaysFilter.all = e.target.value;
+  riskRange.all = { from: "", to: "" };  // picking All or one day replaces the range
+  riskShown = RISK_PAGE;
+  renderRisk();
+});
+
+// Order ID search: filters as you type (both tabs and their counts)
+let riskSearchTimer = 0;
+document.getElementById("riskSearch")?.addEventListener("input", (e) => {
+  clearTimeout(riskSearchTimer);
+  riskSearchTimer = setTimeout(() => { riskSearch = e.target.value; riskShown = RISK_PAGE; renderRisk(); }, 120);
+});
+
+// "Custom range" box shown at the bottom of the Delay days dropdown
+(function riskRangeBox() {
+  const sel = document.getElementById("riskDaysSelect");
+  if (!sel) return;
+  const box = document.createElement("div");
+  box.className = "dd-footer risk-range-box";
+  box.innerHTML = `
+    <div class="risk-range-title">Custom range</div>
+    <div class="risk-range">
+      <input id="riskRangeFrom" type="number" min="0" step="1" inputmode="numeric" placeholder="From" aria-label="Delay days from">
+      <span class="risk-range-to">to</span>
+      <input id="riskRangeTo" type="number" min="0" step="1" inputmode="numeric" placeholder="To" aria-label="Delay days to">
+    </div>
+    <div class="risk-range-actions">
+      <button type="button" class="btn btn-ghost btn-small" data-range="clear">Clear</button>
+      <button type="button" class="btn btn-primary btn-small" data-range="apply">Apply</button>
+    </div>`;
+  sel._ddFooter = box;
+  const clean = (v) => (v === "" || isNaN(Number(v)) ? "" : String(Math.max(0, Math.floor(Number(v)))));
+  function apply(clear) {
+    const f = box.querySelector("#riskRangeFrom"), t = box.querySelector("#riskRangeTo");
+    riskRange.all = clear ? { from: "", to: "" } : { from: clean(f.value), to: clean(t.value) };
+    riskDaysFilter.all = "";
+    riskShown = RISK_PAGE;
+    if (window.heroDdClose) window.heroDdClose();
+    renderRisk();
+  }
+  box.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-range]");
+    if (b) apply(b.dataset.range === "clear");
+  });
+  box.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); apply(false); } });
+})();
+
 (async function init() {
   // Show a loading state immediately; fetch user + the newest orders in parallel.
   showOrdersLoading();
@@ -2376,6 +2713,7 @@ async function fetchOrdersWithProgress() {
       try { setOrdersProgress(96); } catch (e) {}
     });
   await loadMe();
+  if (location.hash === "#risk") showRiskPage(false);
   const first = await firstFetch;
   if (!first || !Array.isArray(first.data)) {
     loadOrders();

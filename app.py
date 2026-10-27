@@ -1303,6 +1303,12 @@ def api_orders():
     if date_to:
         query += " AND NULLIF(created_at, '')::date <= %s::date"
         params.append(date_to)
+    # Exact order number (e.g. "#7257") — used by "Open" on the Risk page and the
+    # Summary chips to show that one order instantly, before the full list arrives.
+    order_name_exact = (request.args.get("order_name") or "").strip()
+    if order_name_exact:
+        query += " AND order_name = %s"
+        params.append(order_name_exact)
     query += " ORDER BY created_at DESC"
     _limit_n = request.args.get("limit", type=int)
     if _limit_n and _limit_n > 0:
@@ -1495,6 +1501,150 @@ def api_orders():
     resp.headers["X-Raw-Length"] = str(len(resp.get_data()))
     resp.headers["X-Truncated"] = "1" if (_limit_n and len(orders) >= _limit_n) else "0"
     return resp
+
+
+# ---------------------------------------------------------------------------
+# Risk (Menu -> Risk): orders running late
+#   Bill risk: arrived more than 48 h ago and still not in Billing (any item
+#              statuses); all of the order's items are listed.
+#   Pack risk: in Billing for more than 24 h and still not packed.
+# Same Billing rule as /api/orders: an order is in Billing once no item is
+# Pending and at least one item is Purchased / In Stock. "In Billing since" is
+# the same time as the order card's "Billed" badge (the last Purchased / In
+# Stock item's change). Trashed and cancelled orders are never at risk.
+# ---------------------------------------------------------------------------
+RISK_HOURS = 48  # Risk: arrived this many hours ago and still not closed
+
+
+def _parse_ts(value):
+    """ISO-8601 text (Shopify or our own) -> aware datetime, or None."""
+    if not value:
+        return None
+    try:
+        d = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d
+
+
+@app.route("/api/risk", methods=["GET"])
+@login_required
+def api_risk():
+    if session.get("role") not in ("owner", "telecaller"):
+        return jsonify({"error": "Only the owner or telecaller can view Risk"}), 403
+    db = get_db()
+    cur = db.cursor()
+    # Let the database do the narrowing (much faster over a remote database like
+    # Supabase): only orders that can be Risk (still has a Pending item) or Danger
+    # (no Pending item, has a Purchased/In Stock item, not packed, bill not
+    # cancelled), and only the columns the cards use. The exact 48-hour rule and
+    # the Delay Days are then worked out below, same as before.
+    cur.execute(
+        "SELECT o.shopify_order_id, o.order_name, o.customer_name, o.created_at, "
+        "       o.shipping_amount, o.payment_type, o.invoice_number, o.packed, o.bill_cancelled "
+        "FROM orders o "
+        "JOIN (SELECT shopify_order_id, "
+        "             bool_or(status = 'pending') AS has_pending, "
+        "             bool_or(status <> 'pending') AS has_done, "
+        "             bool_or(status IN ('purchased', 'stock')) AS has_billable "
+        "      FROM items GROUP BY shopify_order_id) a ON a.shopify_order_id = o.shopify_order_id "
+        "WHERE o.deleted_at IS NULL AND NOT COALESCE(o.cancelled, false) "
+        "  AND ((a.has_pending AND a.has_done) "
+        "       OR (a.has_billable AND NOT COALESCE(o.packed, false) AND NOT COALESCE(o.bill_cancelled, false))) "
+        "ORDER BY o.created_at ASC"
+    )
+    orders = cur.fetchall()
+
+    cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
+    cod_staff_ids = _parse_staff_ids(get_setting("cod_staff_id", ""))
+    prepaid_staff_ids = _parse_staff_ids(get_setting("prepaid_staff_id", ""))
+    staff_names = {}
+    all_staff_ids = set(cod_staff_ids) | set(prepaid_staff_ids)
+    if all_staff_ids:
+        cur.execute("SELECT id, name FROM users WHERE id = ANY(%s)", ([int(x) for x in all_staff_ids],))
+        staff_names = {str(r["id"]): r["name"] for r in cur.fetchall()}
+
+    order_ids = [o["shopify_order_id"] for o in orders]
+    items_by_order = {oid: [] for oid in order_ids}
+    if order_ids:
+        cur.execute(
+            "SELECT shopify_order_id, title, variant_title, quantity, price, vendor, status, updated_at "
+            "FROM items WHERE shopify_order_id = ANY(%s) ORDER BY shopify_order_id, sort_order",
+            (order_ids,),
+        )
+        for item in cur.fetchall():
+            items_by_order.setdefault(item["shopify_order_id"], []).append(item)
+    cur.close()
+
+    now = datetime.now(timezone.utc)
+
+    def card(order, items, since, hours):
+        payment_type = None
+        assigned_to = None
+        if not (order["shipping_amount"] is None and order.get("payment_type") not in ("cod", "prepaid")):
+            payment_type = resolve_payment_type(order, cod_threshold)
+            ids = cod_staff_ids if payment_type == "cod" else prepaid_staff_ids
+            names = [staff_names[i] for i in ids if i in staff_names]
+            assigned_to = ", ".join(names) if names else None
+        return {
+            "order_id": order["shopify_order_id"],
+            "order_name": order["order_name"],
+            "customer_name": order["customer_name"],
+            "payment_type": payment_type,
+            "assigned_to": assigned_to,
+            "created_at": order["created_at"],
+            "since": since.isoformat(),
+            "delay_hours": round(hours, 1),
+            "delay_days": int(hours // 24),
+            "invoice_number": order["invoice_number"],
+            "items": [
+                {"title": i["title"], "variant_title": i["variant_title"], "quantity": i["quantity"],
+                 "price": i["price"], "vendor": i["vendor"], "status": i["status"]}
+                for i in items
+            ],
+        }
+
+    # Same "Closed" rule as the order list: every item has a final status, none Pending.
+    #   Risk:   partly done — at least one item already moved on (Purchased, In Stock,
+    #           N/A, ...) but at least one still Pending — and arrived RISK_HOURS+ hours
+    #           ago. Orders where every item is still Pending are NOT Risk.
+    #           Delay Days = full days since the order arrived.
+    #   Danger: closed, has something to pack (a Purchased / In Stock item), and the
+    #           order is not packed (bill-cancelled orders are left out: nothing to pack).
+    #           Delay Days = full days since it closed (when its last Purchased /
+    #           In Stock item was marked — the "Billed" date on the order card).
+    # Every item of the order is listed on its card. Cancelled and deleted orders
+    # are never included (see the query above).
+    risk, danger = [], []
+    for order in orders:
+        items = items_by_order.get(order["shopify_order_id"], [])
+        if not items:
+            continue
+        closed = all(i["status"] != "pending" for i in items)
+        partly_done = any(i["status"] != "pending" for i in items)
+        billing_items = [i for i in items if i["status"] in ("purchased", "stock")]
+        if not closed:
+            if not partly_done:
+                continue  # every item still Pending: not Risk
+            since = _parse_ts(order["created_at"])
+            if not since:
+                continue
+            hours = (now - since).total_seconds() / 3600
+            if hours >= RISK_HOURS:
+                risk.append(card(order, items, since, hours))
+        elif billing_items and not order["packed"] and not order["bill_cancelled"]:
+            stamps = [t for t in (_parse_ts(i["updated_at"]) for i in billing_items) if t]
+            since = max(stamps) if stamps else _parse_ts(order["created_at"])
+            if not since:
+                continue
+            hours = max(0.0, (now - since).total_seconds() / 3600)
+            danger.append(card(order, items, since, hours))
+
+    risk.sort(key=lambda c: -c["delay_hours"])
+    danger.sort(key=lambda c: -c["delay_hours"])
+    return jsonify({"risk_hours": RISK_HOURS, "risk": risk, "danger": danger})
 
 
 @app.route("/api/orders/summary", methods=["GET"])
