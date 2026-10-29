@@ -997,3 +997,14 @@ main {
 .rp-filter-pills .pill.active { background: var(--amber-bg); color: var(--amber); border-color: var(--amber); }
 .pill.rp-pill[data-status="resent"].active { background: var(--blue-bg); color: var(--blue); border-color: var(--blue); }
 .rp-invno { color: var(--muted); }
+
+.last-invoice-badge {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink, #1f2937);
+  background: var(--card, #fff);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+.last-invoice-badge[hidden] { display: none; }

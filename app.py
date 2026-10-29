@@ -2037,6 +2037,31 @@ def api_order_invoice(order_id):
     return response
 
 
+@app.route("/api/invoices/last", methods=["GET"])
+@can_print_invoice_required
+def api_last_invoice():
+    """The most recently issued invoice number (highest running number, e.g.
+    SHP/2587/2026), so the Billing screen can show where printing stands.
+    Reprints never change it — only a brand-new number does."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute(
+        "SELECT invoice_number, invoice_date, invoice_printed_by FROM orders "
+        "WHERE invoice_number ~ '^[A-Za-z]+/[0-9]+/[0-9]+$' "
+        "ORDER BY split_part(invoice_number, '/', 2)::int DESC, "
+        "split_part(invoice_number, '/', 3)::int DESC LIMIT 1"
+    )
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return jsonify({"invoice_number": None})
+    return jsonify({
+        "invoice_number": row["invoice_number"],
+        "invoice_date": row["invoice_date"],
+        "printed_by": row["invoice_printed_by"],
+    })
+
+
 BULK_INVOICE_LIMIT = 200
 
 

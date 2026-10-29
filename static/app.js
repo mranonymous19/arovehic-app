@@ -47,6 +47,22 @@ const invoiceFilterRow = document.getElementById("invoiceFilterRow");
 const invoiceFilterSelect = document.getElementById("invoiceFilterSelect");
 const tallyFilterSelect = document.getElementById("tallyFilterSelect");
 const billingResultCount = document.getElementById("billingResultCount");
+const lastInvoiceBadge = document.getElementById("lastInvoiceBadge");
+
+// "Last printed invoice" chip in the Billing header. Always asks the server, so it
+// shows the true latest number no matter who printed it or from which device.
+async function refreshLastInvoice() {
+  if (!lastInvoiceBadge) return;
+  try {
+    const res = await fetch("/api/invoices/last");
+    if (!res.ok) return;
+    const d = await res.json();
+    lastInvoiceBadge.textContent = d.invoice_number
+      ? `Last printed invoice: ${d.invoice_number}` + (d.invoice_date ? ` · ${d.invoice_date}` : "")
+      : "Last printed invoice: none yet";
+    lastInvoiceBadge.hidden = currentFilter !== "billing";
+  } catch (e) { /* keep whatever is shown */ }
+}
 const dateFromInput = document.getElementById("dateFromInput");
 const dateToInput = document.getElementById("dateToInput");
 const clearDateFilterBtn = document.getElementById("clearDateFilterBtn");
@@ -228,6 +244,7 @@ async function fetchOrders(extra) {
 
 async function loadOrders() {
   const seq = ++loadOrdersSeq;
+  if (currentFilter === "billing") refreshLastInvoice();
   const first = await fetchOrders({ limit: FIRST_PAGE });
   if (seq !== loadOrdersSeq) return;
   lastLoadedOrders = first.data;
@@ -576,6 +593,7 @@ async function printInvoice(orderId, buttonEl, preOpenedTab) {
         if (invoicePrintedBy) order.invoice_printed_by = invoicePrintedBy;
       }
       renderOrders(filterByTrackQuery(lastLoadedOrders));
+      refreshLastInvoice();
     }
   } catch (err) {
     if (tab) tab.close();
@@ -632,6 +650,7 @@ function renderOrders(orders) {
   } else {
     billingResultCount.textContent = "";
   }
+  if (lastInvoiceBadge) lastInvoiceBadge.hidden = currentFilter !== "billing" || !lastInvoiceBadge.textContent;
 
   if (!orders.length) {
     updateBulkUI();
@@ -1940,6 +1959,7 @@ bulkPdfBtn?.addEventListener("click", async () => {
     bulkSelected.clear();
     bulkAllMode = false;
     renderOrders(filterByTrackQuery(lastLoadedOrders)); // instant: Printed badges + Reprint buttons
+    refreshLastInvoice();
     loadOrders(); // then refresh everything from the server (dates, totals, Tally status)
   } catch (err) {
     showMessage("Could not reach the server to make the invoices PDF.", true);

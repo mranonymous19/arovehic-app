@@ -671,3 +671,6 @@ body.is-loading .topbar::after{content:"";position:absolute;left:0;bottom:-1px;h
   .toast-stack{top:64px;right:16px}
   input,select,textarea{font-size:16px!important}
 }
+
+.last-invoice-badge{background:var(--t-amber-100);color:var(--t-amber-800);border:0;border-radius:999px;padding:3px 10px;font-size:12px;font-weight:600}
+.last-invoice-badge[hidden]{display:none}
