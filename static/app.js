@@ -499,18 +499,29 @@ summaryApplyCustomBtn.addEventListener("click", () => {
   loadSummary("custom");
 });
 
+// Search matching ignores case, spaces and every special character, so
+// "blr 289", "BLR -289" and "BLR-289" all find the order "BLR  -289", and
+// "shp 4357" finds "SHP/4357/2026".
+function normSearch(value) {
+  return String(value == null ? "" : value).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
 function filterByTrackQuery(orders) {
-  const q = orderTrackQuery.trim().toLowerCase();
+  const rawQ = orderTrackQuery.trim().toLowerCase();
+  const q = normSearch(orderTrackQuery);
   let result = orders;
-  if (q) {
+  if (rawQ) {
+    // Query made only of symbols (e.g. "#") has nothing left after cleaning —
+    // fall back to a plain text match so it doesn't match every order.
+    const match = q ? (v) => normSearch(v).includes(q) : (v) => String(v || "").toLowerCase().includes(rawQ);
     result = result.filter((order) => {
       return (
-        (order.order_name || "").toLowerCase().includes(q) ||
-        (order.customer_name || "").toLowerCase().includes(q) ||
-        (order.order_id || "").toLowerCase().includes(q) ||
+        match(order.order_name) ||
+        match(order.customer_name) ||
+        match(order.order_id) ||
         // Invoice number (e.g. "SHP/3270/2026" or just "3270") — works for
         // cancelled bills too, since they keep their invoice number.
-        (order.invoice_number || "").toLowerCase().includes(q)
+        match(order.invoice_number)
       );
     });
   }
@@ -2539,7 +2550,7 @@ function renderRisk() {
   let lo = rg.from === "" ? -Infinity : Number(rg.from);
   let hi = rg.to === "" ? Infinity : Number(rg.to);
   if (lo > hi) [lo, hi] = [hi, lo];  // typed backwards (10 to 1) still works
-  const q = riskSearch.replace(/^#/, "").trim().toLowerCase();
+  const q = normSearch(riskSearch);
   const idOk = (o) => !q || o._key.includes(q);
   const dayOk = want !== ""
     ? (o) => o.delay_days === Number(want)
@@ -2590,7 +2601,7 @@ function riskShowMore() {
 // Prepare a fresh /api/risk answer once: search key per order (no work while typing)
 function riskPrepare(data) {
   for (const o of data.risk.concat(data.danger)) {
-    o._key = String(o.order_name || o.order_id || "").replace(/^#/, "").toLowerCase();
+    o._key = normSearch(o.order_name || o.order_id || "");
   }
   return data;
 }

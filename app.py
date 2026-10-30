@@ -3408,12 +3408,22 @@ def api_activity_log():
         # title, an order number, or a staff name all work here, letting
         # you "track" everything that happened on one order.
         like = f"%{search}%"
-        query += (
-            " AND (activity_log.item_name ILIKE %s OR activity_log.details ILIKE %s "
-            "OR activity_log.user_name ILIKE %s OR orders.order_name ILIKE %s "
-            "OR activity_log.order_id ILIKE %s)"
-        )
+        # Also match ignoring spaces / special characters, so "blr 289"
+        # finds "BLR  -289" (same rule as the order search box).
+        norm = re.sub(r"[\W_]+", "", search.lower())
+        clauses = [
+            "activity_log.item_name ILIKE %s", "activity_log.details ILIKE %s",
+            "activity_log.user_name ILIKE %s", "orders.order_name ILIKE %s",
+            "activity_log.order_id ILIKE %s",
+        ]
         params += [like, like, like, like, like]
+        if norm:
+            nlike = f"%{norm}%"
+            for col in ("activity_log.item_name", "activity_log.details",
+                        "activity_log.user_name", "orders.order_name", "activity_log.order_id"):
+                clauses.append(f"regexp_replace(lower(COALESCE({col}, '')), '[^[:alnum:]]+', '', 'g') LIKE %s")
+                params.append(nlike)
+        query += " AND (" + " OR ".join(clauses) + ")"
     query += " ORDER BY activity_log.id DESC LIMIT 300"
 
     cur.execute(query, params)
