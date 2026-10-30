@@ -1405,11 +1405,21 @@ def api_orders():
             # Only the purchased/in-stock items from Closed orders — an
             # N/A item never shows here, and if a Closed order has no
             # purchased/in-stock items at all it's left out entirely.
-            if not closed:
-                continue
-            items = [i for i in items if i["status"] in ("purchased", "stock")]
-            if not items:
-                continue
+            if order["invoice_number"]:
+                # An invoice was already generated for this order, so it
+                # always stays in Billing with its invoice number — even if
+                # items were refunded / set back to pending / marked N/A
+                # afterwards, or the bill was cancelled. Show the billed
+                # (purchased / in-stock) items; if none are left, show every
+                # item so the card isn't empty.
+                billed_items = [i for i in items if i["status"] in ("purchased", "stock")]
+                items = billed_items or items
+            else:
+                if not closed:
+                    continue
+                items = [i for i in items if i["status"] in ("purchased", "stock")]
+                if not items:
+                    continue
         elif status_filter == "trash":
             pass  # every deleted order shows as-is, items unfiltered
         elif status_filter == "cancelled":
