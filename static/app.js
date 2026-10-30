@@ -507,7 +507,10 @@ function filterByTrackQuery(orders) {
       return (
         (order.order_name || "").toLowerCase().includes(q) ||
         (order.customer_name || "").toLowerCase().includes(q) ||
-        (order.order_id || "").toLowerCase().includes(q)
+        (order.order_id || "").toLowerCase().includes(q) ||
+        // Invoice number (e.g. "SHP/3270/2026" or just "3270") — works for
+        // cancelled bills too, since they keep their invoice number.
+        (order.invoice_number || "").toLowerCase().includes(q)
       );
     });
   }
