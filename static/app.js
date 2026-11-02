@@ -226,6 +226,7 @@ function canTogglePacked() {
 
 let loadOrdersSeq = 0;
 const FIRST_PAGE = 100;
+let listComplete = false; // true once lastLoadedOrders holds every order (not just the first page)
 
 async function fetchOrders(extra) {
   const params = new URLSearchParams();
@@ -248,12 +249,18 @@ async function loadOrders() {
   const first = await fetchOrders({ limit: FIRST_PAGE });
   if (seq !== loadOrdersSeq) return;
   lastLoadedOrders = first.data;
-  renderOrders(filterByTrackQuery(first.data));
+  listComplete = !first.truncated;
+  // A search is active: the server looks through ALL orders, so don't show a
+  // wrong "No match" from the first 100 only.
+  if (orderTrackQuery.trim() && !listComplete) runTrackSearch();
+  else renderOrders(filterByTrackQuery(first.data));
   if (!first.truncated) return;
   fetchOrders().then((all) => {
     if (seq !== loadOrdersSeq) return;
     lastLoadedOrders = all.data;
+    listComplete = true;
     renderOrders(filterByTrackQuery(all.data));
+    setSearchLoading(false);
   });
 }
 
@@ -446,11 +453,13 @@ function goToOrder(orderName) {
       if (seq !== loadOrdersSeq) return;
       if (!Array.isArray(one.data) || !one.data.length) throw new Error("not found");
       lastLoadedOrders = one.data;
+      listComplete = false;
       renderOrders(filterByTrackQuery(one.data));
       jump();
       return fetchOrders().then((all) => {
         if (seq !== loadOrdersSeq || !Array.isArray(all.data)) return;
         lastLoadedOrders = all.data;
+        listComplete = true;
         const matches = filterByTrackQuery(all.data);
         if (matches.length !== one.data.length) renderOrders(matches);
       });
@@ -540,13 +549,94 @@ function filterByTrackQuery(orders) {
   return result;
 }
 
+// ---- Track-an-order search: instant, with a loading bar + skeleton cards ----
+const searchProgressEl = document.getElementById("searchProgress");
+let searchSeq = 0;
+let searchAbort = null;
+
+function setSearchLoading(on) {
+  if (searchProgressEl) searchProgressEl.hidden = !on;
+  orderTrackInput.setAttribute("aria-busy", on ? "true" : "false");
+}
+
+function showSearchSkeleton() {
+  ordersContainer.innerHTML = Array.from({ length: 3 }, () => `
+    <div class="order-skeleton" aria-hidden="true">
+      <div class="sk-line sk-w40"></div>
+      <div class="sk-line sk-w70"></div>
+      <div class="sk-line sk-w25"></div>
+    </div>`).join("");
+}
+
+// Show what we already have right away; ask the server only when the browser
+// can't be sure (list not fully loaded). "No match" appears only after the
+// server has really answered, never while still searching.
+async function runTrackSearch() {
+  const mySeq = ++searchSeq;
+  if (searchAbort) searchAbort.abort();
+  searchAbort = null;
+  const query = orderTrackQuery;
+
+  if (!query.trim()) {
+    setSearchLoading(false);
+    renderOrders(filterByTrackQuery(lastLoadedOrders));
+    return;
+  }
+
+  const local = filterByTrackQuery(lastLoadedOrders);
+  if (listComplete) {
+    // Everything is in the browser: the answer is final, no waiting needed.
+    setSearchLoading(false);
+    renderOrders(local);
+    return;
+  }
+
+  // Not everything is loaded yet: show local hits instantly, otherwise skeletons.
+  setSearchLoading(true);
+  if (local.length) renderOrders(local);
+  else showSearchSkeleton();
+
+  searchAbort = new AbortController();
+  try {
+    const params = new URLSearchParams();
+    if (currentFilter) params.set("status", currentFilter);
+    if (currentPaymentFilter) params.set("payment", currentPaymentFilter);
+    if (currentDateFrom) params.set("date_from", currentDateFrom);
+    if (currentDateTo) params.set("date_to", currentDateTo);
+    params.set("q", query.trim());
+    const res = await fetch(`/api/orders?${params.toString()}`, { signal: searchAbort.signal });
+    const data = await res.json();
+    if (mySeq !== searchSeq) return; // a newer search started
+    if (!res.ok || !Array.isArray(data)) throw new Error("search failed");
+    setSearchLoading(false);
+    renderOrders(filterByTrackQuery(data));
+  } catch (err) {
+    if (err && err.name === "AbortError") return;
+    if (mySeq !== searchSeq) return;
+    setSearchLoading(false);
+    ordersContainer.innerHTML = `
+      <div class="empty-state empty-search">
+        <div class="glyph">Search failed</div>
+        <p>Could not reach the server. Please try again.</p>
+      </div>`;
+  }
+}
+
 let orderTrackDebounce;
 orderTrackInput.addEventListener("input", () => {
   clearTimeout(orderTrackDebounce);
+  // Show the bar the moment typing starts, so it never looks frozen.
+  if (!listComplete && orderTrackInput.value.trim()) setSearchLoading(true);
   orderTrackDebounce = setTimeout(() => {
     orderTrackQuery = orderTrackInput.value;
-    renderOrders(filterByTrackQuery(lastLoadedOrders));
-  }, 120);
+    runTrackSearch();
+  }, listComplete ? 120 : 220);
+});
+orderTrackInput.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  clearTimeout(orderTrackDebounce);
+  orderTrackQuery = orderTrackInput.value;
+  runTrackSearch();
 });
 
 async function deleteOrder(orderId, orderName) {

@@ -1309,6 +1309,15 @@ def api_orders():
     if order_name_exact:
         query += " AND order_name = %s"
         params.append(order_name_exact)
+    # Server-side "Track an order" search. Same matching rule as the browser: case,
+    # spaces and symbols are ignored, so "blr 289" finds "BLR  -289". Lets search
+    # find ANY order straight away, even one not in the first page of the list.
+    search_q = re.sub(r"[^\w]+", "", (request.args.get("q") or "").lower().replace("_", ""))
+    if search_q:
+        _norm = "regexp_replace(lower(COALESCE({c}, '')), '[^[:alnum:]]+', '', 'g')"
+        _cols = ["order_name", "customer_name", "shopify_order_id", "invoice_number"]
+        query += " AND (" + " OR ".join(_norm.format(c=c) + " LIKE %s" for c in _cols) + ")"
+        params.extend(["%" + search_q + "%"] * len(_cols))
     query += " ORDER BY created_at DESC"
     _limit_n = request.args.get("limit", type=int)
     if _limit_n and _limit_n > 0:

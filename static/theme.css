@@ -674,3 +674,13 @@ body.is-loading .topbar::after{content:"";position:absolute;left:0;bottom:-1px;h
 
 .last-invoice-badge{background:var(--t-amber-100);color:var(--t-amber-800);border:0;border-radius:999px;padding:3px 10px;font-size:12px;font-weight:600}
 .last-invoice-badge[hidden]{display:none}
+
+
+/* ---------- Search loading: progress bar + skeleton cards ---------- */
+.search-wrap .search-progress{position:absolute;left:1px;right:1px;bottom:1px;height:3px;overflow:hidden;border-radius:0 0 8px 8px;pointer-events:none}
+.search-wrap .search-progress[hidden]{display:none}
+.search-wrap .search-progress span{display:block;height:100%;width:35%;background:var(--brand);border-radius:3px;animation:loadSlide 1s ease-in-out infinite}
+.order-skeleton{background:var(--card,var(--s100));border:1px solid var(--s200,rgba(128,128,128,.2));border-radius:12px;padding:16px;margin-bottom:12px;display:flex;flex-direction:column;gap:10px}
+.sk-line{height:12px;border-radius:6px;background:linear-gradient(90deg,rgba(128,128,128,.14) 25%,rgba(128,128,128,.28) 37%,rgba(128,128,128,.14) 63%);background-size:400% 100%;animation:skShimmer 1.3s ease infinite}
+.sk-w25{width:25%}.sk-w40{width:40%}.sk-w70{width:70%}
+@keyframes skShimmer{0%{background-position:100% 50%}100%{background-position:0 50%}}
