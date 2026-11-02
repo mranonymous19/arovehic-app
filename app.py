@@ -245,6 +245,28 @@ def init_db():
         ALTER TABLE repurchases ADD COLUMN IF NOT EXISTS invoice_number TEXT;
         ALTER TABLE repurchases ADD COLUMN IF NOT EXISTS invoice_date TEXT;
         ALTER TABLE repurchases ADD COLUMN IF NOT EXISTS invoice_printed_by TEXT;
+
+        -- Returns: items that came back to the shop from a returned order. Each row
+        -- is one item of one return; qty = how many are still in stock (goes down
+        -- with "Use"), qty_returned = how many came back. Own table — nothing in
+        -- orders/items/invoices/Tally changes except orders.returned_at (badge).
+        CREATE TABLE IF NOT EXISTS return_stock (
+            id SERIAL PRIMARY KEY,
+            shopify_order_id TEXT NOT NULL,
+            order_name TEXT,
+            item_id TEXT,
+            title TEXT,
+            variant_title TEXT,
+            vendor TEXT,
+            price TEXT,
+            qty INTEGER NOT NULL,
+            qty_returned INTEGER NOT NULL,
+            returned_at TEXT NOT NULL,
+            returned_by TEXT
+        );
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS returned_at TEXT;
+        -- Items added by hand (no order) have no order id
+        ALTER TABLE return_stock ALTER COLUMN shopify_order_id DROP NOT NULL;
         """
     )
     # Migration: tables created before the 'packer'/'accounts' roles existed
@@ -314,6 +336,44 @@ def log_activity(cur, item_id, item_name, action, details="", order_id=None, use
         (item_id, item_name, order_id, user_name or session.get("name", "unknown"), action, details,
          datetime.now(timezone.utc).isoformat()),
     )
+
+
+def take_from_returns_stock(cur, item_id, order_id, order_name, title, variant_title, quantity):
+    """A NEW order item whose product is in Returns stock is filled from it:
+    the item is marked In Stock and the Returns qty goes down (oldest return
+    first). Matching = same product name + same variant (ignoring case/spaces).
+    Only when Returns stock has enough for the item's full quantity — otherwise
+    the item stays Pending as usual. Returns True when it was filled."""
+    try:
+        need = int(quantity or 1)
+    except (TypeError, ValueError):
+        need = 1
+    if need <= 0 or not (title or "").strip():
+        return False
+    cur.execute(
+        "SELECT id, qty, order_name FROM return_stock WHERE qty > 0 "
+        "AND LOWER(TRIM(title)) = LOWER(TRIM(%s)) "
+        "AND LOWER(TRIM(COALESCE(variant_title, ''))) = LOWER(TRIM(COALESCE(%s, ''))) "
+        "ORDER BY returned_at, id FOR UPDATE",
+        (title, variant_title),
+    )
+    rows = cur.fetchall()
+    if sum(r["qty"] for r in rows) < need:
+        return False
+    left_to_take, sources = need, []
+    for r in rows:
+        if left_to_take <= 0:
+            break
+        take = min(r["qty"], left_to_take)
+        cur.execute("UPDATE return_stock SET qty = qty - %s WHERE id = %s", (take, r["id"]))
+        left_to_take -= take
+        sources.append(f"{take} from {r['order_name'] or 'added by hand'}")
+    now = datetime.now(timezone.utc).isoformat()
+    cur.execute("UPDATE items SET status = 'stock', updated_at = %s WHERE id = %s", (now, item_id))
+    log_activity(cur, item_id, title, "return_stock_used",
+                 f"Auto: marked In Stock from Returns stock for {order_name or order_id} ({', '.join(sources)})",
+                 order_id=order_id, user_name="Returns stock")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -660,7 +720,23 @@ def api_get_settings():
         "cod_shipping_threshold": get_setting("cod_shipping_threshold", "140"),
         "cod_staff_ids": _parse_staff_ids(get_setting("cod_staff_id", "")),
         "prepaid_staff_ids": _parse_staff_ids(get_setting("prepaid_staff_id", "")),
+        "sheets_token": get_setting("sheets_token", ""),
     })
+
+
+@app.route("/api/settings/sheets-token", methods=["POST"])
+@owner_required
+def api_new_sheets_token():
+    """Make a new secret token for the Google Sheet link (the old one stops working)."""
+    import secrets
+    token = secrets.token_urlsafe(24)
+    set_setting("sheets_token", token)
+    db = get_db()
+    cur = db.cursor()
+    log_activity(cur, None, "settings", "settings", f"{session['name']} made a new Google Sheet token")
+    db.commit()
+    cur.close()
+    return jsonify({"ok": True, "sheets_token": token})
 
 
 @app.route("/api/settings", methods=["POST"])
@@ -996,6 +1072,8 @@ def _do_sync(webhook_url, user_name, progress):
                     "VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s)",
                     (item_id, order_id, title, variant_title, quantity, price, vendor, now),
                 )
+                # New item: fill it from Returns stock if that product is there
+                take_from_returns_stock(cur, item_id, order_id, order_name, title, variant_title, quantity)
             item_count += 1
 
     log_activity(cur, None, "sync", "sync", f"{user_name} synced {order_count} orders / {item_count} items from Shopify", user_name=user_name)
@@ -1196,6 +1274,7 @@ def api_add_manual_order():
         log_activity(cur, item_id, item["title"], "manual_add",
                      f"{session['name']} added this item manually",
                      order_id=order_id)
+        take_from_returns_stock(cur, item_id, order_id, raw_order_id, item["title"], "", item["quantity"])
 
     db.commit()
     cur.close()
@@ -1525,6 +1604,7 @@ def api_orders():
                 "invoice_printed_by": order["invoice_printed_by"],
                 "tally_exported_at": order["tally_exported_at"],
                 "deleted_at": order["deleted_at"],
+                "returned_at": order.get("returned_at"),
                 "items": [dict(i) for i in items],
             }
         )
@@ -1582,11 +1662,10 @@ def api_risk():
         "FROM orders o "
         "JOIN (SELECT shopify_order_id, "
         "             bool_or(status = 'pending') AS has_pending, "
-        "             bool_or(status <> 'pending') AS has_done, "
         "             bool_or(status IN ('purchased', 'stock')) AS has_billable "
         "      FROM items GROUP BY shopify_order_id) a ON a.shopify_order_id = o.shopify_order_id "
         "WHERE o.deleted_at IS NULL AND NOT COALESCE(o.cancelled, false) "
-        "  AND ((a.has_pending AND a.has_done) "
+        "  AND (a.has_pending "
         "       OR (a.has_billable AND NOT COALESCE(o.packed, false) AND NOT COALESCE(o.bill_cancelled, false))) "
         "ORDER BY o.created_at ASC"
     )
@@ -1642,9 +1721,8 @@ def api_risk():
         }
 
     # Same "Closed" rule as the order list: every item has a final status, none Pending.
-    #   Risk:   partly done — at least one item already moved on (Purchased, In Stock,
-    #           N/A, ...) but at least one still Pending — and arrived RISK_HOURS+ hours
-    #           ago. Orders where every item is still Pending are NOT Risk.
+    #   Risk:   NOT closed (at least one item still Pending — including orders where
+    #           every item is still Pending) and arrived RISK_HOURS+ hours ago.
     #           Delay Days = full days since the order arrived.
     #   Danger: closed, has something to pack (a Purchased / In Stock item), and the
     #           order is not packed (bill-cancelled orders are left out: nothing to pack).
@@ -1658,11 +1736,8 @@ def api_risk():
         if not items:
             continue
         closed = all(i["status"] != "pending" for i in items)
-        partly_done = any(i["status"] != "pending" for i in items)
         billing_items = [i for i in items if i["status"] in ("purchased", "stock")]
         if not closed:
-            if not partly_done:
-                continue  # every item still Pending: not Risk
             since = _parse_ts(order["created_at"])
             if not since:
                 continue
@@ -1680,6 +1755,350 @@ def api_risk():
     risk.sort(key=lambda c: -c["delay_hours"])
     danger.sort(key=lambda c: -c["delay_hours"])
     return jsonify({"risk_hours": RISK_HOURS, "risk": risk, "danger": danger})
+
+
+# ---------------------------------------------------------------------------
+# Returns: a returned order's items go back into a "Returns stock" list.
+# Owner, Telecaller and Staff can add returns and use stock.
+# ---------------------------------------------------------------------------
+RETURNS_ROLES = ("owner", "telecaller", "staff")
+
+
+def _returns_denied():
+    if session.get("role") not in RETURNS_ROLES:
+        return jsonify({"error": "Your role can't use Returns"}), 403
+    return None
+
+
+@app.route("/api/returns/lookup", methods=["GET"])
+@login_required
+def api_returns_lookup():
+    """Find an order by its number (7257 or #7257) and list its items, with how
+    many of each are already in Returns (so the same item isn't added twice)."""
+    denied = _returns_denied()
+    if denied:
+        return denied
+    q = (request.args.get("order") or "").strip()
+    if not q:
+        return jsonify({"error": "Type an Order ID"}), 400
+    bare = q.lstrip("#").strip()
+    db = get_db()
+    cur = db.cursor()
+    cur.execute(
+        "SELECT shopify_order_id, order_name, customer_name, created_at, returned_at, deleted_at "
+        "FROM orders WHERE order_name IN (%s, %s, %s) OR shopify_order_id = %s "
+        "ORDER BY deleted_at IS NOT NULL, created_at DESC LIMIT 1",
+        (q, bare, "#" + bare, bare),
+    )
+    order = cur.fetchone()
+    if not order:
+        cur.close()
+        return jsonify({"error": f"No order found for {q}"}), 404
+    cur.execute(
+        "SELECT id, title, variant_title, quantity, price, vendor, status FROM items "
+        "WHERE shopify_order_id = %s ORDER BY sort_order",
+        (order["shopify_order_id"],),
+    )
+    items = cur.fetchall()
+    cur.execute(
+        "SELECT item_id, COALESCE(SUM(qty_returned), 0) AS n FROM return_stock "
+        "WHERE shopify_order_id = %s GROUP BY item_id",
+        (order["shopify_order_id"],),
+    )
+    already = {r["item_id"]: int(r["n"]) for r in cur.fetchall()}
+    cur.close()
+    return jsonify({
+        "order_id": order["shopify_order_id"],
+        "order_name": order["order_name"],
+        "customer_name": order["customer_name"],
+        "created_at": order["created_at"],
+        "returned_at": order["returned_at"],
+        "items": [
+            {"id": i["id"], "title": i["title"], "variant_title": i["variant_title"],
+             "quantity": i["quantity"] or 1, "price": i["price"], "vendor": i["vendor"],
+             "status": i["status"], "already_returned": already.get(i["id"], 0)}
+            for i in items
+        ],
+    })
+
+
+@app.route("/api/returns", methods=["POST"])
+@login_required
+def api_returns_add():
+    """Add the ticked items of a returned order to Returns stock.
+    Body: {"order_id": "...", "items": [{"item_id": "...", "qty": 1}, ...]}"""
+    denied = _returns_denied()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    order_id = data.get("order_id")
+    picks = data.get("items") or []
+    if not order_id or not picks:
+        return jsonify({"error": "Tick at least one item"}), 400
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT shopify_order_id, order_name FROM orders WHERE shopify_order_id = %s", (order_id,))
+    order = cur.fetchone()
+    if not order:
+        cur.close()
+        return jsonify({"error": "Order not found"}), 404
+    cur.execute(
+        "SELECT id, title, variant_title, quantity, price, vendor FROM items WHERE shopify_order_id = %s",
+        (order_id,),
+    )
+    items = {i["id"]: i for i in cur.fetchall()}
+    cur.execute(
+        "SELECT item_id, COALESCE(SUM(qty_returned), 0) AS n FROM return_stock "
+        "WHERE shopify_order_id = %s GROUP BY item_id",
+        (order_id,),
+    )
+    already = {r["item_id"]: int(r["n"]) for r in cur.fetchall()}
+    now = datetime.now(timezone.utc).isoformat()
+    who = session.get("name", "unknown")
+    added = []
+    for p in picks:
+        item = items.get(p.get("item_id"))
+        try:
+            qty = int(p.get("qty") or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if not item or qty <= 0:
+            continue
+        left = max(0, int(item["quantity"] or 1) - already.get(item["id"], 0))
+        if qty > left:
+            cur.close()
+            db.rollback()
+            return jsonify({"error": f"Only {left} of “{item['title']}” can still be returned"}), 400
+        # Same item of the same order already in stock: add to that row (one row per item)
+        cur.execute(
+            "UPDATE return_stock SET qty = qty + %s, qty_returned = qty_returned + %s, returned_at = %s, "
+            "returned_by = %s WHERE id = (SELECT id FROM return_stock WHERE shopify_order_id = %s "
+            "AND item_id = %s AND qty > 0 ORDER BY id DESC LIMIT 1) RETURNING id",
+            (qty, qty, now, who, order_id, item["id"]),
+        )
+        if not cur.fetchone():
+            cur.execute(
+                "INSERT INTO return_stock (shopify_order_id, order_name, item_id, title, variant_title, vendor, "
+                "price, qty, qty_returned, returned_at, returned_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (order_id, order["order_name"], item["id"], item["title"], item["variant_title"], item["vendor"],
+                 item["price"], qty, qty, now, who),
+            )
+        log_activity(cur, item["id"], item["title"], "returned",
+                     f"{qty} back to Returns stock", order_id=order_id)
+        added.append({"title": item["title"], "qty": qty})
+    if not added:
+        cur.close()
+        return jsonify({"error": "Tick at least one item"}), 400
+    cur.execute("UPDATE orders SET returned_at = %s WHERE shopify_order_id = %s", (now, order_id))
+    db.commit()
+    cur.close()
+    return jsonify({"ok": True, "order_name": order["order_name"], "added": added})
+
+
+@app.route("/api/returns/products", methods=["GET"])
+@login_required
+def api_returns_products():
+    """Product search for adding Returns stock by hand: every product that has ever
+    been in an order in this app (title + variant + vendor), most-ordered first.
+    Every word typed must appear in the title or variant."""
+    denied = _returns_denied()
+    if denied:
+        return denied
+    words = [w for w in (request.args.get("q") or "").lower().split() if w][:6]
+    if not words or len("".join(words)) < 2:
+        return jsonify([])
+    where = " AND ".join(["(LOWER(title) || ' ' || LOWER(COALESCE(variant_title, ''))) LIKE %s"] * len(words))
+    params = ["%" + w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%" for w in words]
+    cur = get_db().cursor()
+    cur.execute(
+        "SELECT title, variant_title, vendor, MAX(price) AS price, COUNT(*) AS times "
+        f"FROM items WHERE title IS NOT NULL AND {where} "
+        "GROUP BY title, variant_title, vendor ORDER BY COUNT(*) DESC, title LIMIT 25",
+        params,
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    return jsonify(rows)
+
+
+@app.route("/api/returns/manual", methods=["POST"])
+@login_required
+def api_returns_manual():
+    """Add a product to Returns stock by hand (no order).
+    Body: {"title": "...", "variant_title": "...", "vendor": "...", "price": "...", "qty": 1}"""
+    denied = _returns_denied()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()[:500]
+    try:
+        qty = int(data.get("qty") or 0)
+    except (TypeError, ValueError):
+        qty = 0
+    if not title:
+        return jsonify({"error": "Pick a product"}), 400
+    if qty <= 0 or qty > 9999:
+        return jsonify({"error": "Quantity must be 1 or more"}), 400
+    variant = (data.get("variant_title") or "").strip()[:500] or None
+    vendor = (data.get("vendor") or "").strip()[:200] or None
+    price = (str(data.get("price")) if data.get("price") is not None else "").strip()[:50] or None
+    now = datetime.now(timezone.utc).isoformat()
+    who = session.get("name", "unknown")
+    db = get_db()
+    cur = db.cursor()
+    # Same product already added by hand and still in stock: add to that row
+    cur.execute(
+        "UPDATE return_stock SET qty = qty + %s, qty_returned = qty_returned + %s, returned_at = %s, returned_by = %s "
+        "WHERE id = (SELECT id FROM return_stock WHERE shopify_order_id IS NULL AND title = %s "
+        "AND COALESCE(variant_title, '') = COALESCE(%s, '') AND COALESCE(vendor, '') = COALESCE(%s, '') "
+        "AND qty > 0 ORDER BY id DESC LIMIT 1) RETURNING id",
+        (qty, qty, now, who, title, variant, vendor),
+    )
+    if not cur.fetchone():
+        cur.execute(
+            "INSERT INTO return_stock (shopify_order_id, order_name, item_id, title, variant_title, vendor, price, "
+            "qty, qty_returned, returned_at, returned_by) VALUES (NULL, NULL, NULL, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (title, variant, vendor, price, qty, qty, now, who),
+        )
+    log_activity(cur, None, title, "returned", f"{qty} added to Returns stock by hand")
+    db.commit()
+    cur.close()
+    return jsonify({"ok": True, "title": title, "qty": qty})
+
+
+@app.route("/api/returns/filled", methods=["GET"])
+def api_returns_filled():
+    """Read-only list for the Purchasing Google Sheet: order items that were
+    marked In Stock automatically from Returns stock (and are still In Stock).
+    No login — protected by the secret token from Settings -> Google Sheet link.
+    ?token=...&days=14 (1-90)"""
+    import hmac
+    expected = get_setting("sheets_token", "")
+    given = request.args.get("token") or request.headers.get("X-Sheets-Token") or ""
+    if not expected:
+        return jsonify({"error": "Google Sheet link is not set up — make a token in Settings"}), 403
+    if not hmac.compare_digest(given, expected):
+        return jsonify({"error": "Wrong token"}), 401
+    days = request.args.get("days", type=int) or 14
+    days = max(1, min(days, 90))
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    cur = get_db().cursor()
+    cur.execute(
+        "SELECT o.order_name, i.title, i.variant_title, i.quantity, MAX(a.created_at) AS filled_at "
+        "FROM activity_log a "
+        "JOIN items i ON i.id = a.item_id "
+        "JOIN orders o ON o.shopify_order_id = i.shopify_order_id "
+        "WHERE a.action = 'return_stock_used' AND a.user_name = 'Returns stock' "
+        "  AND a.created_at >= %s AND i.status = 'stock' AND o.deleted_at IS NULL "
+        "GROUP BY o.order_name, i.id, i.title, i.variant_title, i.quantity "
+        "ORDER BY filled_at DESC",
+        (cutoff,),
+    )
+    rows = [
+        {"order_name": r["order_name"], "title": r["title"], "variant_title": r["variant_title"] or "",
+         "quantity": r["quantity"], "filled_at": r["filled_at"]}
+        for r in cur.fetchall()
+    ]
+    cur.close()
+    return jsonify(rows)
+
+
+@app.route("/api/returns/stock", methods=["GET"])
+@login_required
+def api_returns_stock():
+    """Everything still in Returns stock (qty above 0), newest return first."""
+    denied = _returns_denied()
+    if denied:
+        return denied
+    cur = get_db().cursor()
+    cur.execute(
+        "SELECT id, shopify_order_id, order_name, title, variant_title, vendor, price, qty, qty_returned, "
+        "returned_at, returned_by FROM return_stock WHERE qty > 0 ORDER BY returned_at DESC, id DESC"
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    return jsonify(rows)
+
+
+@app.route("/api/returns/stock/<int:row_id>", methods=["DELETE"])
+@login_required
+def api_returns_remove(row_id):
+    """Remove a Returns stock row completely (e.g. added by mistake). If that
+    order has nothing else in Returns, its Returned badge goes away too."""
+    denied = _returns_denied()
+    if denied:
+        return denied
+    db = get_db()
+    cur = db.cursor()
+    # ?qty=N removes only N (row stays with the rest); no qty or N >= qty removes the row
+    qty = request.args.get("qty", type=int)
+    cur.execute("SELECT * FROM return_stock WHERE id = %s FOR UPDATE", (row_id,))
+    current = cur.fetchone()
+    if not current:
+        cur.close()
+        return jsonify({"error": "Stock item not found"}), 404
+    if qty is not None and qty <= 0:
+        cur.close()
+        return jsonify({"error": "Quantity must be 1 or more"}), 400
+    if qty is not None and qty < current["qty"]:
+        cur.execute("UPDATE return_stock SET qty = qty - %s WHERE id = %s RETURNING qty", (qty, row_id))
+        left = cur.fetchone()["qty"]
+        log_activity(cur, current["item_id"], current["title"], "return_stock_removed",
+                     f"Removed {qty} from Returns stock ({left} left)", order_id=current["shopify_order_id"])
+        db.commit()
+        cur.close()
+        return jsonify({"ok": True, "qty": left})
+    cur.execute("DELETE FROM return_stock WHERE id = %s RETURNING *", (row_id,))
+    row = cur.fetchone()
+    if row["shopify_order_id"]:
+        cur.execute(
+            "UPDATE orders SET returned_at = NULL WHERE shopify_order_id = %s "
+            "AND NOT EXISTS (SELECT 1 FROM return_stock WHERE shopify_order_id = %s)",
+            (row["shopify_order_id"], row["shopify_order_id"]),
+        )
+    log_activity(cur, row["item_id"], row["title"], "return_stock_removed",
+                 f"Removed from Returns stock ({row['qty']} left of {row['qty_returned']})",
+                 order_id=row["shopify_order_id"])
+    db.commit()
+    cur.close()
+    return jsonify({"ok": True, "qty": 0})
+
+
+@app.route("/api/returns/stock/<int:row_id>/use", methods=["POST"])
+@login_required
+def api_returns_use(row_id):
+    """Take some of a stock row out (e.g. sent in a new order). Body: {"qty": 1, "note": "..."}"""
+    denied = _returns_denied()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    try:
+        qty = int(data.get("qty") or 1)
+    except (TypeError, ValueError):
+        qty = 0
+    note = (data.get("note") or "").strip()[:200]
+    if qty <= 0:
+        return jsonify({"error": "Quantity must be 1 or more"}), 400
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT * FROM return_stock WHERE id = %s FOR UPDATE", (row_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        return jsonify({"error": "Stock item not found"}), 404
+    if qty > row["qty"]:
+        cur.close()
+        db.rollback()
+        return jsonify({"error": f"Only {row['qty']} left in stock"}), 400
+    cur.execute("UPDATE return_stock SET qty = qty - %s WHERE id = %s RETURNING qty", (qty, row_id))
+    left = cur.fetchone()["qty"]
+    log_activity(cur, row["item_id"], row["title"], "return_stock_used",
+                 f"Used {qty} from Returns stock ({left} left)" + (f" — {note}" if note else ""),
+                 order_id=row["shopify_order_id"])
+    db.commit()
+    cur.close()
+    return jsonify({"ok": True, "qty": left})
 
 
 @app.route("/api/orders/summary", methods=["GET"])

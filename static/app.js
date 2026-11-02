@@ -166,6 +166,8 @@ async function loadMe() {
   summaryBtn.hidden = !(isOwner || currentRole === "staff" || currentRole === "telecaller");
   const riskBtnEl = document.getElementById("riskBtn");
   if (riskBtnEl) riskBtnEl.hidden = !(isOwner || currentRole === "telecaller");
+  const returnsBtnEl = document.getElementById("returnsBtn");
+  if (returnsBtnEl) returnsBtnEl.hidden = !(isOwner || currentRole === "telecaller" || currentRole === "staff");
   // Telecaller is otherwise view-only everywhere (every edit endpoint is
   // gated server-side too), but gets the same visibility as the owner so
   // they can pull up any order's full status while on a call.
@@ -910,6 +912,7 @@ function buildOrderCard(order) {
         <span class="order-name">${escapeHtml(order.order_name)}</span>
         <span class="customer">${escapeHtml(order.customer_name || "")}</span>
         ${order.closed ? `<span class="order-closed-badge">Closed</span>` : ""}
+        ${order.returned_at ? `<span class="invoice-badge returned-badge" title="Items from this order are in Returns stock">Returned</span>` : ""}
         ${paymentBadge}
         ${arrivedBadge}
         ${invoiceBadge}
@@ -2128,10 +2131,55 @@ exportPendingBtn.addEventListener("click", () => {
 // Settings modal (owner only)
 // ---------------------------------------------------------------------------
 
+// Settings -> "Google Sheet link": address + secret token the Purchasing sheet's
+// script uses to read which order items were filled from Returns stock.
+function ensureSheetsLinkUI() {
+  if (document.getElementById("sheetsLinkBox")) return;
+  const box = document.createElement("div");
+  box.id = "sheetsLinkBox";
+  box.innerHTML = `
+    <h3 class="modal-subheading">Google Sheet link — Returns stock</h3>
+    <p class="modal-subtext">The Purchasing sheet's Fill Vendors script uses these to mark items filled from Returns stock as STOCK. Keep the token secret.</p>
+    <label for="sheetsUrlOut">ORDER_DESK_URL</label>
+    <div class="sheets-copy-row"><input id="sheetsUrlOut" type="text" readonly><button type="button" class="btn btn-ghost btn-small" data-copy="sheetsUrlOut">Copy</button></div>
+    <label for="sheetsTokenOut">ORDER_DESK_TOKEN</label>
+    <div class="sheets-copy-row"><input id="sheetsTokenOut" type="text" readonly placeholder="No token yet — press New token"><button type="button" class="btn btn-ghost btn-small" data-copy="sheetsTokenOut">Copy</button></div>
+    <div class="modal-actions modal-actions-inline"><button type="button" id="sheetsNewTokenBtn" class="btn btn-ghost">New token</button></div>`;
+  settingsModal.querySelector(".modal-box").appendChild(box);
+  box.addEventListener("click", async (e) => {
+    const c = e.target.closest("[data-copy]");
+    if (c) {
+      const v = document.getElementById(c.dataset.copy).value;
+      if (!v) return;
+      try { await navigator.clipboard.writeText(v); showMessage("Copied."); }
+      catch (err) { document.getElementById(c.dataset.copy).select(); showMessage("Press Ctrl+C to copy."); }
+      return;
+    }
+    if (e.target.closest("#sheetsNewTokenBtn")) {
+      const had = !!document.getElementById("sheetsTokenOut").value;
+      if (had && !e.target.closest("#sheetsNewTokenBtn").dataset.sure) {
+        const b = e.target.closest("#sheetsNewTokenBtn");
+        b.dataset.sure = "1"; b.textContent = "Sure? Old token stops working — press again";
+        setTimeout(() => { delete b.dataset.sure; b.textContent = "New token"; }, 4000);
+        return;
+      }
+      const res = await fetch("/api/settings/sheets-token", { method: "POST" });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { showMessage(d.error || "Could not make a token.", true); return; }
+      document.getElementById("sheetsTokenOut").value = d.sheets_token;
+      const b = document.getElementById("sheetsNewTokenBtn"); delete b.dataset.sure; b.textContent = "New token";
+      showMessage("New token made — update ORDER_DESK_TOKEN in the sheet script.");
+    }
+  });
+}
+
 settingsBtn.addEventListener("click", async () => {
   const res = await fetch("/api/settings");
   const data = await res.json();
   webhookInput.value = data.n8n_webhook_url || "";
+  ensureSheetsLinkUI();
+  document.getElementById("sheetsUrlOut").value = location.origin;
+  document.getElementById("sheetsTokenOut").value = data.sheets_token || "";
   settingsModal.hidden = false;
   scheduleError.hidden = true;
   await loadScheduleSettings();
@@ -2340,6 +2388,9 @@ addUserBtn.addEventListener("click", async () => {
 const ACTIVITY_ACTION_LABELS = {
   status_update: "Status",
   purchase_amount_update: "Amount",
+  returned: "Returned",
+  return_stock_used: "Returns stock used",
+  return_stock_removed: "Returns stock removed",
   packed_update: "Packed",
   cancelled_update: "Cancelled",
   repurchase_add: "Repurchase",
@@ -2668,7 +2719,7 @@ function renderRisk() {
   if (!rows.length) {
     list.innerHTML = filtered && allRows.length
       ? `<div class="empty-state empty-search"><div class="glyph">${q ? "No matching order" : "No orders in this range"}</div><p>${q ? `No ${isRisk ? "Risk" : "Danger"} order matches “${escapeHtml(riskSearch.trim())}”.` : "Try other delay days."}</p></div>`
-      : `<div class="empty-state"><div class="glyph">All caught up</div><p>${isRisk ? "No partly done order is stuck on a Pending item." : "Every closed order is packed."}</p></div>`;
+      : `<div class="empty-state"><div class="glyph">All caught up</div><p>${isRisk ? "No order is waiting too long to close." : "Every closed order is packed."}</p></div>`;
     return;
   }
   const shown = Math.min(riskShown, rows.length);
@@ -2729,6 +2780,7 @@ async function loadRisk() {
 // Open the Risk page (pushHistory=false when opened from the address / Back button)
 function showRiskPage(pushHistory = true) {
   if (!riskBtn || riskBtn.hidden) return; // only roles that may see Risk
+  if (typeof hideReturnsPage === "function") hideReturnsPage(true);
   riskOpen = true;
   document.body.classList.add("view-risk");
   riskView.hidden = false;
@@ -2772,6 +2824,7 @@ document.querySelector(".bottom-nav")?.addEventListener("click", (e) => {
 statusFilterSelect.addEventListener("change", () => hideRiskPage());
 window.addEventListener("popstate", () => {
   if (location.hash === "#risk") showRiskPage(false); else hideRiskPage(true);
+  if (location.hash === "#returns") showReturnsPage(false); else hideReturnsPage(true);
 });
 document.getElementById("riskDaysSelect")?.addEventListener("change", (e) => {
   if (e.target.value === "range") return;
@@ -2822,6 +2875,466 @@ document.getElementById("riskSearch")?.addEventListener("input", (e) => {
   box.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); apply(false); } });
 })();
 
+// ---------------------------------------------------------------------------
+// Returns: when an order comes back to the shop, type its Order ID, tick the
+// items that came back, and they go into the Returns stock list. "Use" takes
+// items out again (qty goes down; at 0 the row leaves the list). Every add/use
+// is written to the order's History. Owner, Telecaller and Staff.
+// ---------------------------------------------------------------------------
+function ensureReturnsUI() {
+  let btn = document.getElementById("returnsBtn");
+  if (!btn) {
+    btn = document.createElement("button");
+    btn.type = "button";
+    btn.id = "returnsBtn";
+    btn.className = "menu-item";
+    btn.setAttribute("role", "menuitem");
+    btn.dataset.hint = "Returned orders & stock";
+    btn.hidden = true;
+    btn.textContent = "Returns Stock";
+    const after = document.getElementById("riskBtn");
+    const before = after ? after.nextSibling : document.getElementById("activityLogBtn");
+    const parent = (after || document.getElementById("activityLogBtn"))?.parentNode;
+    if (parent) parent.insertBefore(btn, before);
+  }
+  let view = document.getElementById("returnsView");
+  if (!view) {
+    view = document.createElement("section");
+    view.id = "returnsView";
+    view.className = "risk-view returns-view";
+    view.hidden = true;
+    view.setAttribute("aria-label", "Returns");
+    const ic = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+    view.innerHTML = `
+      <div class="rt-stats" id="returnsStats">
+        <div class="rt-stat"><span class="rt-stat-ic rt-ic-brand">${ic('<path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="m3 8 9 5 9-5M12 13v8"/>')}</span><div><div class="rt-stat-num" data-stat="units">–</div><div class="rt-stat-label">Items in stock</div></div></div>
+        <div class="rt-stat"><span class="rt-stat-ic rt-ic-blue">${ic('<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>')}</span><div><div class="rt-stat-num" data-stat="products">–</div><div class="rt-stat-label">Products</div></div></div>
+        <div class="rt-stat"><span class="rt-stat-ic rt-ic-green">${ic('<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>')}</span><div><div class="rt-stat-num" data-stat="week">–</div><div class="rt-stat-label">Added this week</div></div></div>
+        <div class="rt-stat"><span class="rt-stat-ic rt-ic-violet">${ic('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>')}</span><div><div class="rt-stat-num" data-stat="hand">–</div><div class="rt-stat-label">Added by hand</div></div></div>
+      </div>
+      <div class="risk-filter rt-add">
+        <form class="rt-add-body" id="returnsFindForm" autocomplete="off">
+          <div class="rt-add-top">
+            <div class="rt-add-title">Add to Stock</div>
+            <div class="segmented returns-mode" role="tablist">
+              <button type="button" class="filter-btn active" data-mode="order">By Order ID</button>
+              <button type="button" class="filter-btn" data-mode="manual">Add manually</button>
+            </div>
+          </div>
+          <div class="rt-search returns-input-field" data-for-mode="order">
+            ${ic('<path d="M5 3h14v18l-3-2-2 2-2-2-2 2-2-2-3 2z"/><path d="M9 8h6M9 12h6"/>')}
+            <input id="returnsOrderInput" type="search" inputmode="search" placeholder="Order ID, e.g. 7257" aria-label="Returned order ID">
+          </div>
+          <div class="rt-search returns-input-field" data-for-mode="manual" hidden>
+            ${ic('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>')}
+            <input id="returnsProductInput" type="search" inputmode="search" placeholder="Product name, e.g. clutch cable activa" aria-label="Product">
+          </div>
+        </form>
+        <div id="returnsPick" hidden></div>
+        <div id="returnsProducts" hidden></div>
+      </div>
+      <div class="returns-stock-head">
+        <div class="returns-stock-title">Stock <span class="risk-count" id="returnsStockCount">…</span></div>
+        <div class="rt-tools">
+          <div class="rt-search rt-search-sm">
+            ${ic('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>')}
+            <input id="returnsStockSearch" type="search" inputmode="search" autocomplete="off" placeholder="Search item, vendor or order ID" aria-label="Search stock">
+          </div>
+          <div class="segmented rt-sort" role="tablist" aria-label="Sort">
+            <button type="button" class="filter-btn active" data-sort="new">Newest</button>
+            <button type="button" class="filter-btn" data-sort="az">A–Z</button>
+            <button type="button" class="filter-btn" data-sort="qty">Qty</button>
+          </div>
+        </div>
+      </div>
+      <div id="returnsList"></div>`;
+    ordersContainer.parentNode.insertBefore(view, ordersContainer.nextSibling);
+  }
+  return [btn, view];
+}
+const [returnsBtn, returnsView] = ensureReturnsUI();
+let returnsOpen = false;
+let returnsStock = null;     // rows from /api/returns/stock
+let returnsSearch = "";
+let returnsShown = 50;
+let returnsPickOrder = null; // order found by "Find order"
+
+function returnsDate(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? "" : d.toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "numeric", month: "short", year: "numeric" });
+}
+
+function renderReturnsPick() {
+  const box = document.getElementById("returnsPick");
+  const o = returnsPickOrder;
+  if (!o) { box.hidden = true; box.innerHTML = ""; return; }
+  box.hidden = false;
+  const rows = o.items.map((i) => {
+    const left = Math.max(0, (i.quantity || 1) - (i.already_returned || 0));
+    const done = left === 0;
+    return `
+      <label class="returns-pick-row${done ? " is-done" : ""}">
+        <input type="checkbox" class="returns-pick-check" data-item="${escapeHtml(i.id)}" ${done ? "disabled" : "checked"}>
+        <span class="returns-pick-main">
+          <span class="item-title">${escapeHtml(i.title || "")}${i.variant_title ? ` — ${escapeHtml(i.variant_title)}` : ""}</span>
+          <span class="item-meta">qty ${i.quantity || 1} · ${escapeHtml(i.price || "")}${i.vendor ? " · " + escapeHtml(i.vendor) : ""}${i.already_returned ? ` · <b>${i.already_returned} already in Returns</b>` : ""}</span>
+        </span>
+        ${done ? `<span class="risk-status">All returned</span>`
+          : `<span class="returns-qty"><span>Qty</span><input type="number" class="returns-pick-qty" data-item="${escapeHtml(i.id)}" min="1" max="${left}" step="1" value="${left}" inputmode="numeric" aria-label="Quantity returned"></span>`}
+      </label>`;
+  }).join("");
+  const anyLeft = o.items.some((i) => (i.quantity || 1) - (i.already_returned || 0) > 0);
+  box.innerHTML = `
+    <div class="returns-pick-head">
+      <span class="order-name">${escapeHtml(o.order_name || "")}</span>
+      <span class="customer">${escapeHtml(o.customer_name || "")}</span>
+      ${o.returned_at ? `<span class="invoice-badge returned-badge">Returned · ${escapeHtml(returnsDate(o.returned_at))}</span>` : ""}
+      <span class="returns-pick-hint">Untick items that didn't come back or are damaged.</span>
+    </div>
+    ${rows || `<div class="returns-pick-row"><span class="item-meta">This order has no items.</span></div>`}
+    <div class="returns-pick-actions">
+      <button type="button" class="btn btn-ghost" data-returns="cancel">Cancel</button>
+      <button type="button" class="btn btn-primary" data-returns="add" ${anyLeft ? "" : "disabled"}>Add to stock</button>
+    </div>`;
+}
+
+// Stock rows only have Remove — stock goes down by itself when a new order uses it
+const RETURNS_ROW_BTNS = `<button type="button" class="btn btn-ghost btn-small returns-remove" data-returns="remove">Remove</button>`;
+let returnsSort = "new";
+const RT_BOX_IC = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="m3 8 9 5 9-5M12 13v8"/></svg>`;
+
+function renderReturnsStats() {
+  const box = document.getElementById("returnsStats");
+  if (!box || !returnsStock) return;
+  const weekAgo = Date.now() - 7 * 864e5;
+  const set = (k, v) => { const el = box.querySelector(`[data-stat="${k}"]`); if (el) el.textContent = v; };
+  set("units", returnsStock.reduce((n, r) => n + r.qty, 0));
+  set("products", returnsStock.length);
+  set("week", returnsStock.filter((r) => new Date(r.returned_at).getTime() >= weekAgo).reduce((n, r) => n + r.qty, 0));
+  set("hand", returnsStock.filter((r) => !r.order_name).reduce((n, r) => n + r.qty, 0));
+}
+
+function renderReturnsList() {
+  const list = document.getElementById("returnsList");
+  const countEl = document.getElementById("returnsStockCount");
+  if (!returnsStock) {
+    countEl.textContent = "…";
+    list.innerHTML = `<div class="empty-state"><div class="glyph">Loading stock…</div><div class="load-bar"><div class="load-bar-fill load-bar-indeterminate"></div></div></div>`;
+    return;
+  }
+  renderReturnsStats();
+  const q = returnsSearch.trim().toLowerCase().replace(/^#/, "");
+  let rows = q ? returnsStock.filter((r) => r._key.includes(q)) : returnsStock.slice();
+  if (returnsSort === "az") rows.sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+  else if (returnsSort === "qty") rows.sort((a, b) => b.qty - a.qty || (a.title || "").localeCompare(b.title || ""));
+  const units = rows.reduce((n, r) => n + r.qty, 0);
+  countEl.textContent = units;
+  if (!rows.length) {
+    list.innerHTML = q
+      ? `<div class="empty-state empty-search"><div class="glyph">No match</div><p>Nothing in stock matches “${escapeHtml(returnsSearch.trim())}”.</p></div>`
+      : `<div class="empty-state rt-empty"><div class="glyph">No returned items yet</div><p>When an order comes back, type its Order ID above and add the items here.</p></div>`;
+    return;
+  }
+  const shown = Math.min(returnsShown, rows.length);
+  list.innerHTML = `<div class="returns-card">` + rows.slice(0, shown).map((r) => `
+    <div class="returns-row" data-id="${r.id}">
+      <span class="rt-row-ic">${RT_BOX_IC}</span>
+      <div class="returns-row-main">
+        <div class="item-title">${escapeHtml(r.title || "")}${r.variant_title ? ` <span class="rt-variant">${escapeHtml(r.variant_title)}</span>` : ""}</div>
+        <div class="rt-tags">
+          ${r.vendor ? `<span class="rt-tag">${escapeHtml(r.vendor)}</span>` : ""}
+          ${r.price ? `<span class="rt-tag">₹${escapeHtml(r.price)}</span>` : ""}
+          ${r.order_name
+            ? `<button type="button" class="rt-tag rt-tag-order returns-order-link" data-order-name="${escapeHtml(r.order_name)}" title="Open order">${escapeHtml(r.order_name)}</button>`
+            : `<span class="rt-tag rt-tag-hand">Added by hand</span>`}
+          <span class="rt-when">${escapeHtml(returnsDate(r.returned_at))}${r.returned_by ? " · " + escapeHtml(r.returned_by) : ""}</span>
+        </div>
+      </div>
+      <div class="returns-row-end">
+        <span class="rt-qty${r.qty >= 5 ? " rt-qty-hi" : ""}" title="${r.qty_returned !== r.qty ? `${r.qty} left of ${r.qty_returned} returned` : `${r.qty} in stock`}"><b>${r.qty}</b><small>${r.qty_returned !== r.qty ? `of ${r.qty_returned}` : "in stock"}</small></span>
+        <span class="returns-use">${RETURNS_ROW_BTNS}</span>
+      </div>
+    </div>`).join("") + `</div>` +
+    (shown < rows.length
+      ? `<div class="orders-more"><span class="orders-more-text">Showing ${shown} of ${rows.length}</span><button type="button" class="btn btn-ghost btn-small" data-returns="more">Show more</button></div>`
+      : "");
+}
+
+async function loadReturnsStock() {
+  try {
+    const res = await fetch("/api/returns/stock");
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !Array.isArray(data)) throw new Error((data && data.error) || "Could not load Returns stock");
+    for (const r of data) r._key = [r.title, r.variant_title, r.vendor, (r.order_name || "").replace(/^#/, "")].join(" ").toLowerCase();
+    returnsStock = data;
+  } catch (err) {
+    if (!returnsStock) {
+      document.getElementById("returnsList").innerHTML = `<div class="empty-state empty-error"><div class="glyph">Returns unavailable</div><p>${escapeHtml(err.message)}</p></div>`;
+      return;
+    }
+    showMessage(err.message, true);
+  }
+  if (returnsOpen) renderReturnsList();
+}
+
+function showReturnsPage(pushHistory = true) {
+  if (!returnsBtn || returnsBtn.hidden) return;
+  hideRiskPage(true);
+  returnsOpen = true;
+  document.body.classList.add("view-returns");
+  returnsView.hidden = false;
+  const title = document.getElementById("heroTitle");
+  if (title) title.textContent = "Returns";
+  document.querySelectorAll(".bottom-nav .nav-item").forEach((b) => b.classList.remove("is-active"));
+  if (pushHistory && location.hash !== "#returns") history.pushState({ returns: true }, "", "#returns");
+  window.scrollTo(0, 0);
+  renderReturnsList();
+  loadReturnsStock();
+}
+
+function hideReturnsPage(fromHistory = false) {
+  if (!returnsOpen) return;
+  returnsOpen = false;
+  document.body.classList.remove("view-returns");
+  returnsView.hidden = true;
+  const title = document.getElementById("heroTitle");
+  if (title) title.textContent = VIEW_TITLES[currentFilter] || (currentFilter === "billing" ? "Billing" : "Order desk");
+  const key = currentFilter === "trash" || currentFilter === "cancelled" || currentFilter === "billing" ? currentFilter : "";
+  const navId = { "": "navOrders", billing: "navBilling", trash: "trashBtn", cancelled: "cancelledBtn" }[key];
+  document.querySelectorAll(".bottom-nav .nav-item").forEach((b) => b.classList.toggle("is-active", b.id === navId));
+  if (!fromHistory && location.hash === "#returns") history.replaceState(null, "", location.pathname + location.search);
+}
+
+
+returnsBtn?.addEventListener("click", () => showReturnsPage());
+document.querySelector(".bottom-nav")?.addEventListener("click", (e) => {
+  const item = e.target.closest(".nav-item");
+  if (item && item.id !== "repurchaseBtn") hideReturnsPage();
+}, true);
+statusFilterSelect.addEventListener("change", () => hideReturnsPage());
+
+// Order ID: looks the order up by itself a moment after you stop typing (no button)
+let returnsLookupTimer = 0, returnsLookupSeq = 0;
+async function returnsLookup(q) {
+  const seq = ++returnsLookupSeq;
+  const box = document.getElementById("returnsPick");
+  if (!q) { returnsPickOrder = null; renderReturnsPick(); return; }
+  box.hidden = false;
+  box.innerHTML = `<div class="returns-pick-note">Looking for ${escapeHtml(q)}…</div>`;
+  try {
+    const res = await fetch(`/api/returns/lookup?order=${encodeURIComponent(q)}`);
+    const data = await res.json().catch(() => ({}));
+    if (seq !== returnsLookupSeq) return;  // a newer search is on its way
+    if (!res.ok) {
+      returnsPickOrder = null;
+      box.innerHTML = `<div class="returns-pick-note">${escapeHtml(data.error || "No order found")}</div>`;
+      return;
+    }
+    returnsPickOrder = data;
+    renderReturnsPick();
+  } catch (err) {
+    if (seq === returnsLookupSeq) box.innerHTML = `<div class="returns-pick-note">Could not reach the server.</div>`;
+  }
+}
+document.getElementById("returnsOrderInput")?.addEventListener("input", (e) => {
+  clearTimeout(returnsLookupTimer);
+  const q = e.target.value.trim();
+  returnsLookupTimer = setTimeout(() => returnsLookup(q), q ? 350 : 0);
+});
+document.getElementById("returnsFindForm")?.addEventListener("submit", (e) => {
+  e.preventDefault();  // Enter looks up straight away
+  clearTimeout(returnsLookupTimer);
+  if (returnsMode === "order") returnsLookup(document.getElementById("returnsOrderInput").value.trim());
+  else returnsProductSearch(document.getElementById("returnsProductInput").value.trim());
+});
+
+// Tabs: By Order ID / Add manually
+let returnsMode = "order";
+function setReturnsMode(mode) {
+  returnsMode = mode;
+  returnsView.querySelectorAll(".returns-mode .filter-btn").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+  returnsView.querySelectorAll("[data-for-mode]").forEach((el) => { el.hidden = el.dataset.forMode !== mode; });
+  document.getElementById("returnsPick").hidden = mode !== "order" || !document.getElementById("returnsPick").innerHTML;
+  document.getElementById("returnsProducts").hidden = mode !== "manual" || !document.getElementById("returnsProducts").innerHTML;
+  const inp = document.getElementById(mode === "order" ? "returnsOrderInput" : "returnsProductInput");
+  if (inp) inp.focus();
+}
+
+// Add manually: search products that have been in any order, pick one, set qty, Add
+let returnsProductTimer = 0, returnsProductSeq = 0, returnsProductRows = [];
+async function returnsProductSearch(q) {
+  const seq = ++returnsProductSeq;
+  const box = document.getElementById("returnsProducts");
+  if (q.replace(/\s/g, "").length < 2) { box.hidden = true; box.innerHTML = ""; returnsProductRows = []; return; }
+  box.hidden = false;
+  if (!returnsProductRows.length) box.innerHTML = `<div class="returns-pick-note">Searching…</div>`;
+  try {
+    const res = await fetch(`/api/returns/products?q=${encodeURIComponent(q)}`);
+    const data = await res.json().catch(() => []);
+    if (seq !== returnsProductSeq) return;
+    if (!res.ok || !Array.isArray(data)) { box.innerHTML = `<div class="returns-pick-note">${escapeHtml((data && data.error) || "Search failed")}</div>`; return; }
+    returnsProductRows = data;
+    box.innerHTML = data.length
+      ? data.map((p, i) => `
+        <div class="returns-pick-row returns-product-row" data-index="${i}">
+          <span class="returns-pick-main">
+            <span class="item-title">${escapeHtml(p.title || "")}${p.variant_title ? ` — ${escapeHtml(p.variant_title)}` : ""}</span>
+            <span class="item-meta">${p.vendor ? escapeHtml(p.vendor) + " · " : ""}${escapeHtml(p.price || "")}</span>
+          </span>
+          <span class="returns-qty"><span>Qty</span><input type="number" class="returns-product-qty" min="1" step="1" value="1" inputmode="numeric" aria-label="Quantity"></span>
+          <button type="button" class="btn btn-primary btn-small" data-returns="add-product">Add</button>
+        </div>`).join("")
+      : `<div class="returns-pick-note">No product matches “${escapeHtml(q)}”. Only products that have been in an order show here.</div>`;
+  } catch (err) {
+    if (seq === returnsProductSeq) box.innerHTML = `<div class="returns-pick-note">Could not reach the server.</div>`;
+  }
+}
+document.getElementById("returnsProductInput")?.addEventListener("input", (e) => {
+  clearTimeout(returnsProductTimer);
+  const q = e.target.value.trim();
+  returnsProductTimer = setTimeout(() => returnsProductSearch(q), 250);
+});
+
+returnsView?.addEventListener("click", async (e) => {
+  const modeBtn = e.target.closest(".returns-mode .filter-btn");
+  if (modeBtn) { setReturnsMode(modeBtn.dataset.mode); return; }
+  const sortBtn = e.target.closest(".rt-sort .filter-btn");
+  if (sortBtn) {
+    returnsSort = sortBtn.dataset.sort;
+    returnsView.querySelectorAll(".rt-sort .filter-btn").forEach((x) => x.classList.toggle("active", x === sortBtn));
+    renderReturnsList();
+    return;
+  }
+  const act = e.target.closest("[data-returns]");
+  const link = e.target.closest(".returns-order-link");
+  if (link && link.dataset.orderName) { hideReturnsPage(); goToOrder(link.dataset.orderName); window.scrollTo(0, 0); return; }
+  if (!act) return;
+  const what = act.dataset.returns;
+  if (what === "cancel") { returnsPickOrder = null; renderReturnsPick(); document.getElementById("returnsOrderInput").value = ""; return; }
+  if (what === "add-product") {
+    const prow = act.closest(".returns-product-row");
+    const p = returnsProductRows[Number(prow.dataset.index)];
+    const qty = Math.floor(Number(prow.querySelector(".returns-product-qty").value));
+    if (!p) return;
+    if (!(qty >= 1)) { showMessage("Quantity must be 1 or more.", true); return; }
+    act.disabled = true;
+    const res = await fetch("/api/returns/manual", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: p.title, variant_title: p.variant_title, vendor: p.vendor, price: p.price, qty }),
+    });
+    const data = await res.json().catch(() => ({}));
+    act.disabled = false;
+    if (!res.ok) { showMessage(data.error || "Could not add to stock.", true); return; }
+    showMessage(`${qty} × ${p.title} added to Returns stock`);
+    prow.querySelector(".returns-product-qty").value = "1";
+    loadReturnsStock();
+    return;
+  }
+  if (what === "more") { returnsShown += 50; renderReturnsList(); return; }
+  if (what === "add") {
+    const box = document.getElementById("returnsPick");
+    const items = [];
+    box.querySelectorAll(".returns-pick-check:checked").forEach((c) => {
+      const q = box.querySelector(`.returns-pick-qty[data-item="${CSS.escape(c.dataset.item)}"]`);
+      const n = Math.floor(Number(q ? q.value : 1));
+      if (n > 0) items.push({ item_id: c.dataset.item, qty: n });
+    });
+    if (!items.length) { showMessage("Tick at least one item.", true); return; }
+    act.disabled = true;
+    const res = await fetch("/api/returns", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ order_id: returnsPickOrder.order_id, items }),
+    });
+    const data = await res.json().catch(() => ({}));
+    act.disabled = false;
+    if (!res.ok) { showMessage(data.error || "Could not add to stock.", true); return; }
+    const n = data.added.reduce((t, a) => t + a.qty, 0);
+    showMessage(`${n} item${n === 1 ? "" : "s"} from ${data.order_name} added to Returns stock`);
+    returnsPickOrder = null;
+    renderReturnsPick();
+    document.getElementById("returnsOrderInput").value = "";
+    loadReturnsStock();
+    return;
+  }
+  const row = act.closest(".returns-row");
+  if (!row) return;
+  const id = Number(row.dataset.id);
+  const r = returnsStock && returnsStock.find((x) => x.id === id);
+  if (!r) return;
+  const slot = row.querySelector(".returns-use");
+  if (what === "use") {
+    slot.innerHTML = `
+      <input type="number" class="returns-use-qty" min="1" max="${r.qty}" step="1" value="1" inputmode="numeric" aria-label="How many to use">
+      <button type="button" class="btn btn-primary btn-small" data-returns="use-ok">Use</button>
+      <button type="button" class="btn btn-ghost btn-small" data-returns="use-cancel" aria-label="Cancel">✕</button>`;
+    const inp = slot.querySelector("input"); inp.focus(); inp.select();
+    return;
+  }
+  if (what === "use-cancel" || what === "remove-no") { slot.innerHTML = RETURNS_ROW_BTNS; return; }
+  if (what === "remove") {
+    // Ask how many to remove (default 1; the full qty removes the whole row)
+    slot.innerHTML = `<span class="returns-confirm">Remove</span>
+      <input type="number" class="returns-use-qty returns-remove-qty" min="1" max="${r.qty}" step="1" value="1" inputmode="numeric" aria-label="How many to remove">
+      <span class="returns-confirm-of">of ${r.qty}</span>
+      <button type="button" class="btn btn-small returns-remove-yes" data-returns="remove-yes">Remove</button>
+      <button type="button" class="btn btn-ghost btn-small" data-returns="remove-no" aria-label="Cancel">✕</button>`;
+    const inp = slot.querySelector("input"); inp.focus(); inp.select();
+    return;
+  }
+  if (what === "remove-yes") {
+    const qty = Math.floor(Number(slot.querySelector(".returns-remove-qty").value));
+    if (!(qty >= 1 && qty <= r.qty)) { showMessage(`Enter 1 to ${r.qty}.`, true); return; }
+    act.disabled = true;
+    const res = await fetch(`/api/returns/stock/${id}?qty=${qty}`, { method: "DELETE" });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 404) {
+      // Already gone on the server (removed elsewhere): reload the real list
+      showMessage("That item was already removed — list refreshed.", true);
+      loadReturnsStock();
+      return;
+    }
+    if (!res.ok) { act.disabled = false; showMessage(data.error || "Could not remove.", true); return; }
+    // Server says how many are left; an older app.py doesn't, so work it out here
+    r.qty = Number.isFinite(data.qty) ? data.qty : Math.max(0, r.qty - qty);
+    if (r.qty <= 0) returnsStock = returnsStock.filter((x) => x.id !== id);
+    showMessage(r.qty > 0 ? `Removed ${qty} × ${r.title} — ${r.qty} left` : `Removed ${r.title} from stock`);
+    renderReturnsList();
+    loadReturnsStock();  // re-read from the server so the screen always matches what's saved
+    return;
+  }
+  if (what === "use-ok") {
+    const qty = Math.floor(Number(slot.querySelector("input").value));
+    if (!(qty >= 1 && qty <= r.qty)) { showMessage(`Enter 1 to ${r.qty}.`, true); return; }
+    act.disabled = true;
+    const res = await fetch(`/api/returns/stock/${id}/use`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ qty }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { act.disabled = false; showMessage(data.error || "Could not update stock.", true); return; }
+    r.qty = data.qty;
+    if (r.qty <= 0) returnsStock = returnsStock.filter((x) => x.id !== id);
+    showMessage(`Used ${qty} × ${r.title}${data.qty > 0 ? ` — ${data.qty} left` : " — none left"}`);
+    renderReturnsList();
+  }
+});
+returnsView?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target.classList.contains("returns-product-qty")) {
+    e.preventDefault();
+    e.target.closest(".returns-product-row")?.querySelector('[data-returns="add-product"]')?.click();
+    return;
+  }
+  if (e.key === "Enter" && e.target.classList.contains("returns-use-qty")) {
+    e.preventDefault();
+    e.target.parentNode.querySelector('[data-returns="remove-yes"], [data-returns="use-ok"]')?.click();
+  }
+});
+let returnsSearchTimer = 0;
+document.getElementById("returnsStockSearch")?.addEventListener("input", (e) => {
+  clearTimeout(returnsSearchTimer);
+  returnsSearchTimer = setTimeout(() => { returnsSearch = e.target.value; returnsShown = 50; renderReturnsList(); }, 120);
+});
+
 (async function init() {
   // Show a loading state immediately; fetch user + the newest orders in parallel.
   showOrdersLoading();
@@ -2838,6 +3351,7 @@ document.getElementById("riskSearch")?.addEventListener("input", (e) => {
     });
   await loadMe();
   if (location.hash === "#risk") showRiskPage(false);
+  if (location.hash === "#returns") showReturnsPage(false);
   const first = await firstFetch;
   if (!first || !Array.isArray(first.data)) {
     loadOrders();
