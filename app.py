@@ -1020,9 +1020,8 @@ def _run_sync_job(state, webhook_url, user_name):
         _write_progress(state)
 
 
-@app.route("/api/sync", methods=["POST"])
-@staff_or_owner_required
-def api_sync():
+def _start_sync(triggered_by):
+    """Shared by the browser button (/api/sync) and the n8n schedule (/api/sync/auto)."""
     import json
     import threading
     webhook_url = get_setting("n8n_webhook_url")
@@ -1043,8 +1042,25 @@ def api_sync():
     state = {"id": uuid.uuid4().hex, "state": "running", "phase": "fetching",
              "started": time.time(), "expected_ms": expected_ms, "done": 0, "total": 0}
     _write_progress(state)
-    threading.Thread(target=_run_sync_job, args=(state, webhook_url, session["name"]), daemon=True).start()
+    threading.Thread(target=_run_sync_job, args=(state, webhook_url, triggered_by), daemon=True).start()
     return jsonify({"ok": True, "id": state["id"]}), 202
+
+
+@app.route("/api/sync", methods=["POST"])
+@staff_or_owner_required
+def api_sync():
+    return _start_sync(session["name"])
+
+
+@app.route("/api/sync/auto", methods=["POST"])
+def api_sync_auto():
+    """Token-authenticated trigger for the scheduled n8n workflow (no login session)."""
+    import hmac
+    expected = os.environ.get("AUTO_SYNC_TOKEN", "").encode()
+    provided = request.headers.get("X-Auto-Sync-Token", "").encode()
+    if not expected or not hmac.compare_digest(provided, expected):
+        return jsonify({"error": "unauthorized"}), 401
+    return _start_sync("Auto-sync (n8n)")
 
 
 @app.route("/api/sync/progress")
