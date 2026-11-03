@@ -57,9 +57,13 @@ async function refreshLastInvoice() {
     const res = await fetch("/api/invoices/last");
     if (!res.ok) return;
     const d = await res.json();
-    lastInvoiceBadge.textContent = d.invoice_number
-      ? `Last printed invoice: ${d.invoice_number}` + (d.invoice_date ? ` · ${d.invoice_date}` : "")
-      : "Last printed invoice: none yet";
+    // COD and SHP have separate running numbers: show the latest of each
+    const part = (x) => x ? x.invoice_number + (x.invoice_date ? ` (${x.invoice_date})` : "") : "none yet";
+    lastInvoiceBadge.textContent = (d.cod || d.shp)
+      ? `Last printed — COD: ${part(d.cod)} · SHP: ${part(d.shp)}`
+      : d.invoice_number
+        ? `Last printed invoice: ${d.invoice_number}` + (d.invoice_date ? ` · ${d.invoice_date}` : "")
+        : "Last printed invoice: none yet";
     lastInvoiceBadge.hidden = currentFilter !== "billing";
   } catch (e) { /* keep whatever is shown */ }
 }
@@ -247,6 +251,7 @@ async function fetchOrders(extra) {
 
 async function loadOrders() {
   const seq = ++loadOrdersSeq;
+  try { searchCache.clear(); } catch (e) { /* not set up yet */ } // fresh data -> forget old search answers
   if (currentFilter === "billing") refreshLastInvoice();
   const first = await fetchOrders({ limit: FIRST_PAGE });
   if (seq !== loadOrdersSeq) return;
@@ -532,9 +537,26 @@ function filterByTrackQuery(orders) {
         match(order.order_id) ||
         // Invoice number (e.g. "SHP/3270/2026" or just "3270") — works for
         // cancelled bills too, since they keep their invoice number.
-        match(order.invoice_number)
+        match(order.invoice_number) ||
+        // ...and its earlier numbers if it was changed ("Invoice changed · was ...")
+        String(order.previous_invoice_numbers || "").split(",").some((n) => n.trim() && match(n))
       );
     });
+    // Best matches first (same idea as the server search): exact order / invoice number,
+    // then order numbers starting with what was typed, then customer name, then the rest
+    // (e.g. a match inside the long Shopify ID). Keeps the normal order within each group.
+    if (q) {
+      const rank = (o) => {
+        const name = normSearch(o.order_name);
+        if (name === q || normSearch(o.invoice_number) === q ||
+            String(o.previous_invoice_numbers || "").split(",").some((n) => normSearch(n) === q)) return 0;
+        if (name.startsWith(q)) return 1;
+        if (normSearch(o.customer_name).includes(q)) return 2;
+        if (name.includes(q) || normSearch(o.invoice_number).includes(q)) return 3;
+        return 4;
+      };
+      result = result.map((o, i) => [rank(o), i, o]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((x) => x[2]);
+    }
   }
   if (currentFilter === "billing" && currentInvoiceFilter) {
     result = result.filter((order) =>
@@ -559,6 +581,33 @@ let searchAbort = null;
 function setSearchLoading(on) {
   if (searchProgressEl) searchProgressEl.hidden = !on;
   orderTrackInput.setAttribute("aria-busy", on ? "true" : "false");
+  // Spinner in place of the magnifier + "Searching…" inside the box
+  const wrap = orderTrackInput.closest(".search-wrap");
+  if (wrap) wrap.classList.toggle("is-searching", !!on);
+}
+
+// Server search returns only the best matches (exact order / invoice number first),
+// so a short query like "2" doesn't download thousands of orders.
+const SEARCH_LIMIT = 50;
+// Recent server answers (per query + filters) — backspacing or retyping is instant.
+const searchCache = new Map();
+function searchCacheGet(key) {
+  const hit = searchCache.get(key);
+  if (hit && Date.now() - hit.t < 30000) return hit.data;
+  if (hit) searchCache.delete(key);
+  return null;
+}
+function searchCachePut(key, data) {
+  searchCache.set(key, { t: Date.now(), data });
+  if (searchCache.size > 40) searchCache.delete(searchCache.keys().next().value);
+}
+// "Showing the 50 best matches" line under the results when there may be more
+function addSearchMoreNote(count) {
+  if (count < SEARCH_LIMIT) return;
+  const note = document.createElement("div");
+  note.className = "search-more-note";
+  note.textContent = `Showing the ${SEARCH_LIMIT} best matches — type more of the order number, name or invoice to narrow it down.`;
+  ordersContainer.prepend(note);
 }
 
 function showSearchSkeleton() {
@@ -598,20 +647,32 @@ async function runTrackSearch() {
   if (local.length) renderOrders(local);
   else showSearchSkeleton();
 
+  const params = new URLSearchParams();
+  if (currentFilter) params.set("status", currentFilter);
+  if (currentPaymentFilter) params.set("payment", currentPaymentFilter);
+  if (currentDateFrom) params.set("date_from", currentDateFrom);
+  if (currentDateTo) params.set("date_to", currentDateTo);
+  params.set("q", query.trim());
+  params.set("limit", String(SEARCH_LIMIT));
+  const cacheKey = params.toString();
+  const cached = searchCacheGet(cacheKey);
+  if (cached) {
+    setSearchLoading(false);
+    renderOrders(filterByTrackQuery(cached));
+    addSearchMoreNote(cached.length);
+    return;
+  }
+
   searchAbort = new AbortController();
   try {
-    const params = new URLSearchParams();
-    if (currentFilter) params.set("status", currentFilter);
-    if (currentPaymentFilter) params.set("payment", currentPaymentFilter);
-    if (currentDateFrom) params.set("date_from", currentDateFrom);
-    if (currentDateTo) params.set("date_to", currentDateTo);
-    params.set("q", query.trim());
-    const res = await fetch(`/api/orders?${params.toString()}`, { signal: searchAbort.signal });
+    const res = await fetch(`/api/orders?${cacheKey}`, { signal: searchAbort.signal });
     const data = await res.json();
     if (mySeq !== searchSeq) return; // a newer search started
     if (!res.ok || !Array.isArray(data)) throw new Error("search failed");
+    searchCachePut(cacheKey, data);
     setSearchLoading(false);
     renderOrders(filterByTrackQuery(data));
+    addSearchMoreNote(data.length);
   } catch (err) {
     if (err && err.name === "AbortError") return;
     if (mySeq !== searchSeq) return;
@@ -632,7 +693,7 @@ orderTrackInput.addEventListener("input", () => {
   orderTrackDebounce = setTimeout(() => {
     orderTrackQuery = orderTrackInput.value;
     runTrackSearch();
-  }, listComplete ? 120 : 220);
+  }, listComplete ? 80 : 150);
 });
 orderTrackInput.addEventListener("keydown", (e) => {
   if (e.key !== "Enter") return;
@@ -855,6 +916,9 @@ function buildOrderCard(order) {
     const invoiceBadge = showInvoiceInfo
       ? (order.invoice_number
           ? `<span class="invoice-badge invoice-badge-printed">Invoice Printed · ${escapeHtml(order.invoice_number)}${order.invoice_printed_by ? ` · by ${escapeHtml(order.invoice_printed_by)}` : ""}</span>`
+            + (order.previous_invoice_numbers
+              ? `<span class="invoice-badge invoice-changed-badge" title="Invoice number changed (payment type changed after printing)">Invoice changed · was ${escapeHtml(order.previous_invoice_numbers)}</span>`
+              : "")
           : `<span class="invoice-badge invoice-badge-not-printed">Not Printed</span>`)
       : "";
     const totalBadge = (showInvoiceInfo && order.order_total != null)
@@ -2991,12 +3055,40 @@ function renderReturnsPick() {
       ${o.returned_at ? `<span class="invoice-badge returned-badge">Returned · ${escapeHtml(returnsDate(o.returned_at))}</span>` : ""}
       <span class="returns-pick-hint">Untick items that didn't come back or are damaged.</span>
     </div>
+    ${anyLeft ? `<label class="returns-pick-row returns-pick-all">
+      <input type="checkbox" class="returns-pick-all-check" checked aria-label="Select all items">
+      <span class="returns-pick-main"><span class="item-title">Select all</span></span>
+      <span class="returns-pick-count"></span>
+    </label>` : ""}
     ${rows || `<div class="returns-pick-row"><span class="item-meta">This order has no items.</span></div>`}
     <div class="returns-pick-actions">
       <button type="button" class="btn btn-ghost" data-returns="cancel">Cancel</button>
       <button type="button" class="btn btn-primary" data-returns="add" ${anyLeft ? "" : "disabled"}>Add to stock</button>
     </div>`;
+  syncReturnsPickAll();
 }
+
+// "Select all": ticks / unticks every item; shows a dash when only some are ticked
+function syncReturnsPickAll() {
+  const box = document.getElementById("returnsPick");
+  const all = box && box.querySelector(".returns-pick-all-check");
+  if (!all) return;
+  const checks = [...box.querySelectorAll(".returns-pick-check:not(:disabled)")];
+  const on = checks.filter((c) => c.checked).length;
+  all.checked = on > 0 && on === checks.length;
+  all.indeterminate = on > 0 && on < checks.length;
+  const count = box.querySelector(".returns-pick-count");
+  if (count) count.textContent = `${on} of ${checks.length} selected`;
+  const addBtn = box.querySelector('[data-returns="add"]');
+  if (addBtn) addBtn.disabled = on === 0;
+}
+document.getElementById("returnsPick")?.addEventListener("change", (e) => {
+  const box = e.currentTarget;
+  if (e.target.classList.contains("returns-pick-all-check")) {
+    box.querySelectorAll(".returns-pick-check:not(:disabled)").forEach((c) => { c.checked = e.target.checked; });
+  }
+  if (e.target.classList.contains("returns-pick-all-check") || e.target.classList.contains("returns-pick-check")) syncReturnsPickAll();
+});
 
 // Stock rows only have Remove — stock goes down by itself when a new order uses it
 const RETURNS_ROW_BTNS = `<button type="button" class="btn btn-ghost btn-small returns-remove" data-returns="remove">Remove</button>`;

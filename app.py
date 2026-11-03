@@ -265,8 +265,27 @@ def init_db():
             returned_by TEXT
         );
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS returned_at TEXT;
+        -- Earlier invoice numbers of an order whose number was changed (newest last, comma separated)
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS previous_invoice_numbers TEXT;
         -- Items added by hand (no order) have no order id
         ALTER TABLE return_stock ALTER COLUMN shopify_order_id DROP NOT NULL;
+
+        -- Order Details Master sheet feed: one row per item each time an item is
+        -- refunded or an order is cancelled / bill-cancelled in the app
+        -- (action 'set'), or that is undone (action 'clear'). A Supabase webhook
+        -- on INSERT sends each row to the sheet's OrderAutofill.gs.
+        CREATE TABLE IF NOT EXISTS odm_refund_cancel (
+            id SERIAL PRIMARY KEY,
+            order_id TEXT NOT NULL,
+            order_name TEXT,
+            item_id TEXT,
+            item_title TEXT,
+            amount NUMERIC,
+            kind TEXT NOT NULL,
+            action TEXT NOT NULL,
+            event_date TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
         """
     )
     # Migration: tables created before the 'packer'/'accounts' roles existed
@@ -336,6 +355,43 @@ def log_activity(cur, item_id, item_name, action, details="", order_id=None, use
         (item_id, item_name, order_id, user_name or session.get("name", "unknown"), action, details,
          datetime.now(timezone.utc).isoformat()),
     )
+
+
+def odm_event(cur, kind, action, order_id, item_ids=None):
+    """Write rows for the Order Details Master sheet (see odm_refund_cancel table).
+    kind: 'refunded' | 'cancelled'; action: 'set' | 'clear'.
+    item_ids=None means every item of the order (cancel / bill cancel)."""
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    # India time (+05:30, no daylight saving) — a fixed offset works on Windows too,
+    # where Python has no time-zone database for "Asia/Kolkata"
+    event_date = now.astimezone(timezone(timedelta(hours=5, minutes=30))).strftime("%d/%m/%Y")
+    if item_ids is None:
+        cur.execute(
+            "SELECT i.id, i.title, i.quantity, i.price, o.order_name FROM items i "
+            "JOIN orders o ON o.shopify_order_id = i.shopify_order_id "
+            "WHERE i.shopify_order_id = %s ORDER BY i.sort_order",
+            (order_id,),
+        )
+    else:
+        cur.execute(
+            "SELECT i.id, i.title, i.quantity, i.price, o.order_name FROM items i "
+            "JOIN orders o ON o.shopify_order_id = i.shopify_order_id "
+            "WHERE i.id = ANY(%s) ORDER BY i.sort_order",
+            (list(item_ids),),
+        )
+    for it in cur.fetchall():
+        amount = None
+        if kind == "refunded":
+            try:
+                amount = round(float(it["price"] or 0) * int(it["quantity"] or 1), 2)
+            except (TypeError, ValueError):
+                amount = None
+        cur.execute(
+            "INSERT INTO odm_refund_cancel (order_id, order_name, item_id, item_title, amount, kind, action, "
+            "event_date, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (order_id, it["order_name"], it["id"], it["title"], amount, kind, action, event_date, now.isoformat()),
+        )
 
 
 def take_from_returns_stock(cur, item_id, order_id, order_name, title, variant_title, quantity):
@@ -1314,6 +1370,77 @@ def invoice_number_for_payment(invoice_number, payment_type):
     return ("COD" if payment_type == "cod" else "SHP") + "/" + rest
 
 
+def next_invoice_seq(cur, prefix):
+    """Next running number for one invoice series. COD and SHP each have their own
+    counter (COD/5512/2026, SHP/5512/2026, COD/5513/2026, ...). Both counters
+    start from the old shared counter (so no number already issued can repeat),
+    and never go below the highest number already used in that series. The
+    counter row is locked while reading, so two people printing at once can't
+    get the same number."""
+    key = "invoice_seq_next_" + prefix.lower()
+    cur.execute("SELECT value FROM settings WHERE key = 'invoice_seq_next'")
+    shared = cur.fetchone()
+    start = int(shared["value"]) if shared and str(shared["value"]).isdigit() else 2501
+    cur.execute(
+        "INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING",
+        (key, str(start)),
+    )
+    # Remember where the separate series began (numbers below it came from the old shared counter)
+    cur.execute(
+        "INSERT INTO settings (key, value) VALUES ('invoice_seq_split_at', %s) ON CONFLICT (key) DO NOTHING",
+        (str(start),),
+    )
+    cur.execute("SELECT value FROM settings WHERE key = %s FOR UPDATE", (key,))
+    seq = int(cur.fetchone()["value"])
+    cur.execute(
+        "SELECT COALESCE(MAX(split_part(invoice_number, '/', 2)::int), 0) AS m FROM orders "
+        "WHERE invoice_number ~ ('^' || %s || '/[0-9]+/[0-9]+$')",
+        (prefix,),
+    )
+    seq = max(seq, int(cur.fetchone()["m"]) + 1)
+    cur.execute("UPDATE settings SET value = %s WHERE key = %s", (str(seq + 1), key))
+    return seq
+
+
+def invoice_number_for_order(cur, order_id, invoice_number, payment_type):
+    """The invoice number an already-printed order should carry for its payment
+    type. Same prefix -> unchanged. Different prefix (payment type changed after
+    printing):
+      - number from the separate COD/SHP series -> always the next number of the
+        other series (a printed number is never handed to another order);
+      - old number from the shared counter (below the split point) -> swap the
+        prefix if that number is free in the other series, else next number."""
+    swapped = invoice_number_for_payment(invoice_number, payment_type)
+    if swapped == invoice_number:
+        return invoice_number
+    prefix, num, year = swapped.split("/", 2)
+    cur.execute("SELECT value FROM settings WHERE key = 'invoice_seq_split_at'")
+    row = cur.fetchone()
+    split_at = int(row["value"]) if row and str(row["value"]).isdigit() else None
+    if split_at is not None and num.isdigit() and int(num) >= split_at:
+        return f"{prefix}/{next_invoice_seq(cur, prefix)}/{year}"
+    cur.execute(
+        "SELECT 1 FROM orders WHERE invoice_number = %s AND shopify_order_id <> %s LIMIT 1",
+        (swapped, order_id),
+    )
+    if not cur.fetchone():
+        return swapped
+    return f"{prefix}/{next_invoice_seq(cur, prefix)}/{year}"
+
+
+def change_invoice_number(cur, order_id, old_number, new_number):
+    """Save a changed invoice number and remember the old one, so the order card
+    can show "Invoice changed · was COD/5513/2026"."""
+    cur.execute(
+        "UPDATE orders SET invoice_number = %s, "
+        "previous_invoice_numbers = CASE WHEN %s IS NULL OR %s = '' THEN previous_invoice_numbers "
+        "  WHEN COALESCE(previous_invoice_numbers, '') = '' THEN %s "
+        "  ELSE previous_invoice_numbers || ', ' || %s END "
+        "WHERE shopify_order_id = %s",
+        (new_number, old_number, old_number, old_number, old_number, order_id),
+    )
+
+
 def price_edit_delta(billing_items):
     """How much the manually edited item prices changed the order total vs
     what Shopify billed (sum of (new - original) x qty). Shopify's
@@ -1410,10 +1537,18 @@ def api_orders():
     search_q = re.sub(r"[^\w]+", "", (request.args.get("q") or "").lower().replace("_", ""))
     if search_q:
         _norm = "regexp_replace(lower(COALESCE({c}, '')), '[^[:alnum:]]+', '', 'g')"
-        _cols = ["order_name", "customer_name", "shopify_order_id", "invoice_number"]
+        # previous_invoice_numbers: earlier numbers of a changed invoice ("Invoice changed · was ...")
+        _cols = ["order_name", "customer_name", "shopify_order_id", "invoice_number", "previous_invoice_numbers"]
         query += " AND (" + " OR ".join(_norm.format(c=c) + " LIKE %s" for c in _cols) + ")"
         params.extend(["%" + search_q + "%"] * len(_cols))
-    query += " ORDER BY created_at DESC"
+        # Best matches first: exact order number / invoice number, then order numbers that
+        # start with what was typed, then everything else (newest first within each group)
+        query += (" ORDER BY CASE WHEN " + _norm.format(c="order_name") + " = %s OR "
+                  + _norm.format(c="invoice_number") + " = %s THEN 0 WHEN "
+                  + _norm.format(c="order_name") + " LIKE %s THEN 1 ELSE 2 END, created_at DESC")
+        params.extend([search_q, search_q, search_q + "%"])
+    else:
+        query += " ORDER BY created_at DESC"
     _limit_n = request.args.get("limit", type=int)
     if _limit_n and _limit_n > 0:
         _limit_n = min(_limit_n, 1000)
@@ -1605,6 +1740,7 @@ def api_orders():
                 "tally_exported_at": order["tally_exported_at"],
                 "deleted_at": order["deleted_at"],
                 "returned_at": order.get("returned_at"),
+                "previous_invoice_numbers": order.get("previous_invoice_numbers"),
                 "items": [dict(i) for i in items],
             }
         )
@@ -2373,14 +2509,8 @@ def _issue_invoice(db, order_id, cod_threshold):
         # while doing it so two people printing at once can't collide on
         # the same number. Once set, it's stored on the order so reprinting
         # later always returns the same invoice number.
-        cur.execute("SELECT value FROM settings WHERE key = %s FOR UPDATE", ("invoice_seq_next",))
-        row = cur.fetchone()
-        seq = int(row["value"]) if row else 2501
-        cur.execute(
-            "INSERT INTO settings (key, value) VALUES (%s, %s) "
-            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-            ("invoice_seq_next", str(seq + 1)),
-        )
+        # COD and SHP each have their own running number (see next_invoice_seq).
+        seq = next_invoice_seq(cur, invoice_prefix)
         now = datetime.now()
         invoice_date = f"{now.day}-{now.strftime('%b-%y')}"  # same as %-d-%b-%y, but works on Windows too
         invoice_number = f"{invoice_prefix}/{seq}/{now.year}"
@@ -2390,15 +2520,12 @@ def _issue_invoice(db, order_id, cod_threshold):
             (invoice_number, invoice_date, session["name"], order_id),
         )
     else:
-        invoice_number = invoice_number_for_payment(order["invoice_number"], payment_type)
+        invoice_number = invoice_number_for_order(cur, order_id, order["invoice_number"], payment_type)
         invoice_date = order["invoice_date"]
         if invoice_number != order["invoice_number"]:
             # Payment type changed after first print (or before this fix) —
             # bring the stored number in line with it.
-            cur.execute(
-                "UPDATE orders SET invoice_number = %s WHERE shopify_order_id = %s",
-                (invoice_number, order_id),
-            )
+            change_invoice_number(cur, order_id, order["invoice_number"], invoice_number)
         # Reprinting updates who last touched it — "who gave the print" is
         # answered by whoever most recently printed or reprinted it, not
         # necessarily whoever first issued the invoice number.
@@ -2499,20 +2626,31 @@ def api_last_invoice():
     Reprints never change it — only a brand-new number does."""
     db = get_db()
     cur = db.cursor()
-    cur.execute(
-        "SELECT invoice_number, invoice_date, invoice_printed_by FROM orders "
-        "WHERE invoice_number ~ '^[A-Za-z]+/[0-9]+/[0-9]+$' "
-        "ORDER BY split_part(invoice_number, '/', 2)::int DESC, "
-        "split_part(invoice_number, '/', 3)::int DESC LIMIT 1"
-    )
-    row = cur.fetchone()
+    out = {}
+    # COD and SHP have separate running numbers, so report the latest of each
+    for prefix in ("COD", "SHP"):
+        cur.execute(
+            "SELECT invoice_number, invoice_date, invoice_printed_by FROM orders "
+            "WHERE invoice_number ~ ('^' || %s || '/[0-9]+/[0-9]+$') "
+            "ORDER BY split_part(invoice_number, '/', 2)::int DESC, "
+            "split_part(invoice_number, '/', 3)::int DESC LIMIT 1",
+            (prefix,),
+        )
+        out[prefix.lower()] = cur.fetchone()
     cur.close()
-    if not row:
-        return jsonify({"invoice_number": None})
+    latest = max((r for r in out.values() if r), default=None,
+                 key=lambda r: int(r["invoice_number"].split("/")[1]))
+    if not latest:
+        return jsonify({"invoice_number": None, "cod": None, "shp": None})
+    def pack(r):
+        return {"invoice_number": r["invoice_number"], "invoice_date": r["invoice_date"],
+                "printed_by": r["invoice_printed_by"]} if r else None
     return jsonify({
-        "invoice_number": row["invoice_number"],
-        "invoice_date": row["invoice_date"],
-        "printed_by": row["invoice_printed_by"],
+        "invoice_number": latest["invoice_number"],
+        "invoice_date": latest["invoice_date"],
+        "printed_by": latest["invoice_printed_by"],
+        "cod": pack(out["cod"]),
+        "shp": pack(out["shp"]),
     })
 
 
@@ -2653,13 +2791,13 @@ def _collect_invoices_for_tally(date_from, date_to, only_new):
         ptype = resolve_payment_type(o, cod_threshold) or "prepaid"
         # An order printed before the SHP/COD fix (or edited since) may carry the
         # wrong prefix; export the number that matches its payment type.
-        fixed_no = invoice_number_for_payment(od["invoice_number"], ptype)
-        if fixed_no != od["invoice_number"]:
-            fix_cur = db.cursor()
-            fix_cur.execute(
-                "UPDATE orders SET invoice_number = %s WHERE shopify_order_id = %s",
-                (fixed_no, od["shopify_order_id"]),
-            )
+        fix_cur = db.cursor()
+        fixed_no = invoice_number_for_order(fix_cur, od["shopify_order_id"], od["invoice_number"], ptype)
+        if fixed_no == od["invoice_number"]:
+            db.commit()  # releases a counter row if one was locked
+            fix_cur.close()
+        else:
+            change_invoice_number(fix_cur, od["shopify_order_id"], od["invoice_number"], fixed_no)
             db.commit()
             fix_cur.close()
             od["invoice_number"] = fixed_no
@@ -2780,15 +2918,21 @@ def api_update_bill_cancelled(order_id):
     db = get_db()
     cur = db.cursor()
     cur.execute(
-        "UPDATE orders SET bill_cancelled = %s, bill_cancelled_reason = %s, "
+        "UPDATE orders o SET bill_cancelled = %s, bill_cancelled_reason = %s, "
         "bill_cancelled_by = %s, bill_cancelled_at = %s "
-        "WHERE shopify_order_id = %s RETURNING order_name, invoice_number",
+        "FROM orders old WHERE o.shopify_order_id = %s AND old.shopify_order_id = o.shopify_order_id "
+        "RETURNING o.order_name, o.invoice_number, old.bill_cancelled AS was, o.cancelled AS other",
         vals + (order_id,),
     )
     row = cur.fetchone()
     if row is None:
         cur.close()
         return jsonify({"error": "Order not found"}), 404
+    # Order Details Master sheet: Bill Cancelled counts as cancelled
+    if cancelled and not row["was"]:
+        odm_event(cur, "cancelled", "set", order_id)
+    elif not cancelled and row["was"] and not row["other"]:
+        odm_event(cur, "cancelled", "clear", order_id)
     label = row["invoice_number"] or "(not printed)"
     log_activity(
         cur, None, row["order_name"] or order_id, "bill_cancelled_update",
@@ -2919,6 +3063,11 @@ def api_update_item_status(item_id):
         log_activity(cur, item_id, row["title"], "status_update",
                      f"{session['name']} changed status: {row['old_status']} -> {status}",
                      order_id=row["shopify_order_id"])
+        # Order Details Master sheet: refund set / undone
+        if status == "refunded":
+            odm_event(cur, "refunded", "set", row["shopify_order_id"], [item_id])
+        elif row["old_status"] == "refunded":
+            odm_event(cur, "refunded", "clear", row["shopify_order_id"], [item_id])
     db.commit()
     cur.close()
     return jsonify({"ok": True, "id": item_id, "status": status})
@@ -3314,9 +3463,9 @@ def api_edit_order(order_id):
     # must follow the payment type — otherwise a Prepaid -> COD edit leaves a
     # COD order carrying an SHP/... number (and the reverse).
     if payment_switched and order["invoice_number"]:
-        new_inv = invoice_number_for_payment(order["invoice_number"], set_payment_type)
+        new_inv = invoice_number_for_order(cur, order_id, order["invoice_number"], set_payment_type)
         if new_inv != order["invoice_number"]:
-            cur.execute("UPDATE orders SET invoice_number = %s WHERE shopify_order_id = %s", (new_inv, order_id))
+            change_invoice_number(cur, order_id, order["invoice_number"], new_inv)
             changes.append(f"invoice no. {order['invoice_number']} -> {new_inv}")
     # The Tally XML is built live from the order/items, so it always carries the
     # edited figures — no invoice reprint needed. If this order was already
@@ -3796,14 +3945,20 @@ def api_update_order_cancelled(order_id):
     db = get_db()
     cur = db.cursor()
     cur.execute(
-        "UPDATE orders SET cancelled = %s, cancelled_reason = %s, cancelled_by = %s, cancelled_at = %s "
-        "WHERE shopify_order_id = %s RETURNING order_name",
+        "UPDATE orders o SET cancelled = %s, cancelled_reason = %s, cancelled_by = %s, cancelled_at = %s "
+        "FROM orders old WHERE o.shopify_order_id = %s AND old.shopify_order_id = o.shopify_order_id "
+        "RETURNING o.order_name, old.cancelled AS was, o.bill_cancelled AS other",
         (cancelled, cancelled_reason, cancelled_by, cancelled_at, order_id),
     )
     row = cur.fetchone()
     if row is None:
         cur.close()
         return jsonify({"error": "Order not found"}), 404
+    # Order Details Master sheet: cancel set / undone
+    if cancelled and not row["was"]:
+        odm_event(cur, "cancelled", "set", order_id)
+    elif not cancelled and row["was"] and not row["other"]:
+        odm_event(cur, "cancelled", "clear", order_id)
 
     log_activity(
         cur, None, row["order_name"] or order_id, "cancelled_update",
