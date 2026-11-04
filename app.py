@@ -239,6 +239,16 @@ def init_db():
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_cancelled_by TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_cancelled_at TEXT;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_edited BOOLEAN NOT NULL DEFAULT false;
+        -- Order ID (display name, e.g. #7257) edited by hand — sync must not overwrite it
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_name_edited BOOLEAN NOT NULL DEFAULT false;
+        -- Orders deleted permanently from Trash. Kept as a tombstone so the next
+        -- Shopify sync (which re-sends recent orders) doesn't bring them back.
+        CREATE TABLE IF NOT EXISTS purged_orders (
+            shopify_order_id TEXT PRIMARY KEY,
+            order_name TEXT,
+            purged_by TEXT,
+            purged_at TEXT
+        );
         ALTER TABLE items ADD COLUMN IF NOT EXISTS item_edited BOOLEAN NOT NULL DEFAULT false;
         ALTER TABLE repurchases ADD COLUMN IF NOT EXISTS batch TEXT;
         ALTER TABLE repurchases ADD COLUMN IF NOT EXISTS price NUMERIC;
@@ -1029,6 +1039,9 @@ def _do_sync(webhook_url, user_name, progress):
     order_count = 0
     item_count = 0
 
+    cur.execute("SELECT shopify_order_id FROM purged_orders")
+    purged_ids = {r["shopify_order_id"] for r in cur.fetchall()}
+
     for idx, order in enumerate(orders):
         if idx and idx % 3 == 0:
             progress["done"] = idx
@@ -1036,6 +1049,8 @@ def _do_sync(webhook_url, user_name, progress):
         order_id = str(order.get("id") or order.get("order_id") or "").strip()
         if not order_id:
             continue
+        if order_id in purged_ids:
+            continue  # permanently deleted from Trash — never re-import
         order_name = order.get("name") or order.get("order_name") or order_id
         customer_name = order.get("customer_name") or order.get("customer") or ""
         created_at = order.get("created_at") or ""
@@ -1080,7 +1095,7 @@ def _do_sync(webhook_url, user_name, progress):
             "balance_due, created_at, synced_at) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (shopify_order_id) DO UPDATE SET "
-            "order_name = EXCLUDED.order_name, "
+            "order_name = CASE WHEN orders.order_name_edited THEN orders.order_name ELSE EXCLUDED.order_name END, "
             "customer_name = CASE WHEN orders.order_edited THEN orders.customer_name ELSE EXCLUDED.customer_name END, "
             "shipping_address = CASE WHEN orders.order_edited THEN orders.shipping_address ELSE EXCLUDED.shipping_address END, "
             "shipping_address1 = CASE WHEN orders.order_edited THEN orders.shipping_address1 ELSE EXCLUDED.shipping_address1 END, "
@@ -2999,6 +3014,41 @@ def api_restore_order(order_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/orders/<order_id>/permanent", methods=["DELETE"])
+@owner_required
+def api_purge_order(order_id):
+    """Owner only. Permanently removes an order that is already in Trash —
+    the order row and its items. Can't be undone. The order id is remembered
+    in purged_orders so a later Shopify sync doesn't re-import it. Activity
+    history, Repurchase and Returns stock rows are left alone."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT order_name, deleted_at FROM orders WHERE shopify_order_id = %s", (order_id,))
+    order = cur.fetchone()
+    if not order:
+        cur.close()
+        return jsonify({"error": "Order not found"}), 404
+    if not order["deleted_at"]:
+        cur.close()
+        return jsonify({"error": "Move the order to Trash first — only orders in Trash can be deleted permanently"}), 400
+
+    now = datetime.now(timezone.utc).isoformat()
+    name = order["order_name"] or order_id
+    cur.execute(
+        "INSERT INTO purged_orders (shopify_order_id, order_name, purged_by, purged_at) "
+        "VALUES (%s, %s, %s, %s) ON CONFLICT (shopify_order_id) DO NOTHING",
+        (order_id, order["order_name"], session["name"], now),
+    )
+    cur.execute("DELETE FROM items WHERE shopify_order_id = %s", (order_id,))
+    cur.execute("DELETE FROM orders WHERE shopify_order_id = %s", (order_id,))
+    log_activity(cur, None, name, "order_purge",
+                 f"{session['name']} permanently deleted order {name} from Trash",
+                 order_id=order_id)
+    db.commit()
+    cur.close()
+    return jsonify({"ok": True})
+
+
 def order_assigned_to_user(cur, order_id, user_id):
     """True if `order_id`'s current COD/Prepaid duty staff includes `user_id`.
 
@@ -3250,6 +3300,13 @@ def api_edit_order(order_id):
     pincode = (data.get("pincode") or "").strip()
     if not customer_name:
         errors.append("Customer name is required")
+    # Order ID (the display name, e.g. "#7257"). Optional in the payload so older
+    # callers keep working; if sent, it can't be blank.
+    new_order_name = None
+    if "order_name" in data:
+        new_order_name = (data.get("order_name") or "").strip()
+        if not new_order_name:
+            errors.append("Order ID can't be empty")
 
     try:
         new_shipping = round(float(data.get("shipping_amount") or 0), 2)
@@ -3318,6 +3375,17 @@ def api_edit_order(order_id):
         return jsonify({"error": "order not found"}), 404
     cur.execute("SELECT * FROM items WHERE shopify_order_id = %s", (order_id,))
     old_items = {i["id"]: dict(i) for i in cur.fetchall()}
+
+    rename_to = None
+    if new_order_name is not None and new_order_name != (order["order_name"] or ""):
+        cur.execute(
+            "SELECT 1 FROM orders WHERE order_name = %s AND shopify_order_id <> %s AND deleted_at IS NULL LIMIT 1",
+            (new_order_name, order_id),
+        )
+        if cur.fetchone():
+            cur.close()
+            return jsonify({"error": f"Another order is already using the ID {new_order_name}"}), 400
+        rename_to = new_order_name
 
     for it in parsed:
         if it["id"] and it["id"] not in old_items:
@@ -3397,6 +3465,8 @@ def api_edit_order(order_id):
                          order_id=order_id)
 
     # ---- order-level fields ----
+    if rename_to:
+        changes.append(f"order ID '{order['order_name'] or ''}' -> '{rename_to}'")
     full_address = ", ".join(x for x in [address1, address2, city, state, pincode] if x)
     old_full = order["shipping_address"] or ""
     if (order["customer_name"] or "") != customer_name:
@@ -3455,6 +3525,14 @@ def api_edit_order(order_id):
         (customer_name, phone, full_address, address1, address2, city, state, pincode,
          new_shipping, new_balance, set_payment_type, order_id),
     )
+    if rename_to:
+        cur.execute(
+            "UPDATE orders SET order_name = %s, order_name_edited = true WHERE shopify_order_id = %s",
+            (rename_to, order_id),
+        )
+        # Keep the copies of the order ID in Repurchase and Returns in step
+        cur.execute("UPDATE repurchases SET order_name = %s WHERE shopify_order_id = %s", (rename_to, order_id))
+        cur.execute("UPDATE return_stock SET order_name = %s WHERE shopify_order_id = %s", (rename_to, order_id))
     if payment_switched or cash_changed:
         # amount_to_receive is locked in at invoice print time; it's recomputed on the
         # next (re)print, so drop the stale figure now.

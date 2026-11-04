@@ -716,6 +716,23 @@ async function deleteOrder(orderId, orderName) {
   showMessage(`Moved ${orderName || orderId} to Trash.`);
 }
 
+async function purgeOrder(orderId, orderName, invoiceNumber) {
+  const label = orderName || orderId;
+  const extra = invoiceNumber
+    ? `\n\nThis order already has invoice ${invoiceNumber}. If it was exported to Tally, the voucher there is NOT removed.`
+    : "";
+  if (!confirm(`Permanently delete order ${label}?\n\nThe order and all its items will be erased and CANNOT be restored.${extra}`)) return;
+  const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/permanent`, { method: "DELETE" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    showMessage(data.error || "Could not delete the order permanently.", true);
+    return;
+  }
+  lastLoadedOrders = lastLoadedOrders.filter((o) => o.order_id !== orderId);
+  renderOrders(filterByTrackQuery(lastLoadedOrders));
+  showMessage(`Permanently deleted ${label}.`);
+}
+
 async function restoreOrder(orderId, orderName) {
   const res = await fetch(`/api/orders/${encodeURIComponent(orderId)}/restore`, { method: "POST" });
   const data = await res.json().catch(() => ({}));
@@ -951,6 +968,9 @@ function buildOrderCard(order) {
     const billBadge = (showInvoiceInfo && order.bill_cancelled)
       ? `<span class="invoice-badge cancelled-badge" title="${escapeHtml(order.bill_cancelled_reason || "")}">Bill Cancelled${order.bill_cancelled_reason ? ": " + escapeHtml(order.bill_cancelled_reason) : ""}</span>`
       : "";
+    // Edit Order is available from the moment an order arrives (not only once an
+    // item reaches Billing) — owner and accounts, never inside Trash.
+    const canEditOrder = (currentRole === "owner" || currentRole === "accounts") && currentFilter !== "trash";
     const canCancelBill = showInvoiceInfo && (currentRole === "owner" || currentRole === "accounts");
     const billingEligible = (order.items || []).some((i) => i.status === "purchased" || i.status === "stock");
     // Cancelling is the packer/owner-only alternative to packing — same
@@ -992,11 +1012,13 @@ function buildOrderCard(order) {
       <span class="order-head-actions">
         ${canPack ? `<label class="order-packed-checkbox"><input type="checkbox" class="order-packed-input" ${order.packed ? "checked" : ""} /> Packed</label>` : ""}
         ${canManageCancel ? `<label class="order-cancelled-checkbox"><input type="checkbox" class="order-cancelled-input" ${order.cancelled ? "checked" : ""} /> Cancelled</label>` : ""}
+        ${canEditOrder ? `<button type="button" class="btn btn-ghost btn-small order-edit-link">Edit Order</button>` : ""}
         ${canCancelBill ? `<button type="button" class="btn btn-ghost btn-small btn-danger order-bill-cancel-link">${order.bill_cancelled ? "Restore Bill" : "Cancel Bill"}</button>` : ""}
         ${canPrintInvoice && !order.bill_cancelled ? `<button type="button" class="btn btn-ghost btn-small order-invoice-link" data-order-id="${escapeHtml(order.order_id)}">${order.invoice_number ? "Reprint Invoice" : "Print Invoice"}</button>` : ""}
         ${(currentRole === "owner" || currentRole === "telecaller") && currentFilter !== "trash" ? `<button type="button" class="btn btn-ghost btn-small order-repurchase-link" data-order-id="${escapeHtml(order.order_id)}">Repurchase</button>` : ""}
         ${(currentRole === "owner" || currentRole === "telecaller") ? `<button type="button" class="order-history-link" data-order-id="${escapeHtml(order.order_id)}">History</button>` : ""}
         ${currentRole === "owner" && currentFilter === "trash" ? `<button type="button" class="btn btn-primary btn-small order-restore-link" data-order-id="${escapeHtml(order.order_id)}">Restore</button>` : ""}
+        ${currentRole === "owner" && currentFilter === "trash" ? `<button type="button" class="btn btn-ghost btn-small btn-danger order-purge-link" data-order-id="${escapeHtml(order.order_id)}">Delete Forever</button>` : ""}
         ${currentRole === "owner" && currentFilter !== "trash" ? `<button type="button" class="btn btn-ghost btn-small btn-danger order-delete-link" data-order-id="${escapeHtml(order.order_id)}">Delete</button>` : ""}
       </span>
     `;
@@ -1025,6 +1047,9 @@ function buildOrderCard(order) {
     }
     const rpLink = head.querySelector(".order-repurchase-link");
     if (rpLink) rpLink.addEventListener("click", () => openRepurchasePicker(order.order_id));
+    if (canEditOrder) {
+      head.querySelector(".order-edit-link").addEventListener("click", () => openEditOrder(order.order_id));
+    }
     if (canCancelBill) {
       head.querySelector(".order-bill-cancel-link").addEventListener("click", () => {
         const label = order.invoice_number ? `bill ${order.invoice_number}` : `the bill of ${order.order_name || order.order_id}`;
@@ -1049,6 +1074,7 @@ function buildOrderCard(order) {
     if (currentRole === "owner") {
       if (currentFilter === "trash") {
         head.querySelector(".order-restore-link").addEventListener("click", () => restoreOrder(order.order_id, order.order_name));
+        head.querySelector(".order-purge-link").addEventListener("click", () => purgeOrder(order.order_id, order.order_name, order.invoice_number));
       } else {
         head.querySelector(".order-delete-link").addEventListener("click", () => deleteOrder(order.order_id, order.order_name));
       }
@@ -1099,6 +1125,7 @@ async function updateItemPrice(itemId, value) {
 // ---------------------------------------------------------------------------
 const editOrderModal = document.getElementById("editOrderModal");
 const eoTitle = document.getElementById("eoTitle");
+const eoOrderName = document.getElementById("eoOrderName");
 const eoCustomerName = document.getElementById("eoCustomerName");
 const eoPhone = document.getElementById("eoPhone");
 const eoAddress1 = document.getElementById("eoAddress1");
@@ -1189,6 +1216,7 @@ async function openEditOrder(orderId) {
     return;
   }
   eoTitle.textContent = `Edit Order ${data.order_name || ""}`.trim();
+  eoOrderName.value = data.order_name || "";
   eoCustomerName.value = data.customer_name;
   eoPhone.value = data.phone;
   eoAddress1.value = data.address1;
@@ -1232,6 +1260,7 @@ async function eoSave(reprintTab) {
     });
   });
   const payload = {
+    order_name: eoOrderName.value.trim(),
     customer_name: eoCustomerName.value.trim(),
     phone: eoPhone.value.trim(),
     address1: eoAddress1.value.trim(),

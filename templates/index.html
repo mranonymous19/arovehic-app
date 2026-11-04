@@ -357,7 +357,7 @@
     </div>
   </div>
 
-  <!-- Edit order modal (accounts/owner, Billing) -->
+  <!-- Edit order modal (owner/accounts, any time before or after billing) -->
   <div id="editOrderModal" class="modal" hidden>
     <div class="modal-box modal-box-wide manual-order-modal">
       <div class="modal-head">
@@ -369,6 +369,9 @@
       </div>
 
       <div class="mo-grid">
+        <label class="span-2">Order ID
+          <input id="eoOrderName" type="text" placeholder="e.g. #7257">
+        </label>
         <label>Customer Name
           <input id="eoCustomerName" type="text">
         </label>
@@ -562,7 +565,7 @@
     </div>
   </div>
 
-  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script src="{{ url_for('static', filename='app.js') }}?v=order-edit-1"></script>
   <script src="{{ url_for('static', filename='hero.js') }}"></script>
 </body>
 </html>
