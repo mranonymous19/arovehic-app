@@ -227,6 +227,37 @@ def _ledger_master(name, parent, extra=""):
     )
 
 
+def _sales_ledger_extra(since):
+    """Sales ledger settings copied from the real company's export: GST applicable,
+    affects stock, Taxable, CGST 9 / SGST 9 / IGST 18 (state: Any). Only used when the
+    ledger has to be created; an existing ledger in Tally is left as it is."""
+    pct = GST_RATE * 100
+    half = pct / 2
+    rates = "".join(
+        "<RATEDETAILS.LIST>"
+        f"<GSTRATEDUTYHEAD>{head}</GSTRATEDUTYHEAD>"
+        "<GSTRATEVALUATIONTYPE>Based on Value</GSTRATEVALUATIONTYPE>"
+        f"<GSTRATE>{value:g}</GSTRATE>"
+        "</RATEDETAILS.LIST>"
+        for head, value in (("CGST", half), ("SGST/UTGST", half), ("IGST", pct))
+    )
+    return (
+        f"<GSTAPPLICABLE>{TALLY_APPLICABLE}</GSTAPPLICABLE>"
+        "<TAXTYPE>Others</TAXTYPE>"
+        "<GSTTYPEOFSUPPLY>Goods</GSTTYPEOFSUPPLY>"
+        "<AFFECTSSTOCK>Yes</AFFECTSSTOCK>"
+        "<GSTDETAILS.LIST>"
+        f"<APPLICABLEFROM>{since}</APPLICABLEFROM>"
+        "<TAXABILITY>Taxable</TAXABILITY>"
+        "<SRCOFGSTDETAILS>Specify Details Here</SRCOFGSTDETAILS>"
+        "<STATEWISEDETAILS.LIST>"
+        f"<STATENAME>{TALLY_ANY}</STATENAME>"
+        f"{rates}"
+        "</STATEWISEDETAILS.LIST>"
+        "</GSTDETAILS.LIST>"
+    )
+
+
 def _unit_master(unit):
     return (
         '<TALLYMESSAGE xmlns:UDF="TallyUDF">'
@@ -422,7 +453,7 @@ def build_tally_xml(records, company="", masters=True, vouchers=True):
 
     master_msgs = [_unit_master(UOM)]
     if any(r.get("kind", "sale") != "credit_note" for r in records) or not records:
-        master_msgs.append(_ledger_master(SALES_LEDGER, "Sales Accounts"))
+        master_msgs.append(_ledger_master(SALES_LEDGER, "Sales Accounts", _sales_ledger_extra(since)))
     # NOTE: the Sales Return ledger is deliberately NOT created/updated here -- it must
     # already exist in Tally with its own GST settings, and we must not overwrite them.
     if any(not r["is_intrastate"] for r in records):
@@ -435,6 +466,8 @@ def build_tally_xml(records, company="", masters=True, vouchers=True):
             _ledger_master(
                 DELIVERY_LEDGER,
                 "Direct Incomes",
+                f"<GSTAPPLICABLE>{TALLY_NOT_APPLICABLE}</GSTAPPLICABLE>"
+                "<TAXTYPE>Others</TAXTYPE>"
                 "<LEDMAILINGDETAILS.LIST>"
                 f"<APPLICABLEFROM>{since}</APPLICABLEFROM>"
                 f"<MAILINGNAME>{x(DELIVERY_LEDGER)}</MAILINGNAME>"

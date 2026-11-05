@@ -27,6 +27,21 @@ Print one bill -> /tally shows a Sale, status Sent -> check Tally's Day Book. Ca
 credit note date if needed, then "Create credit notes". Rows whose total no longer matches the printed invoice
 are unticked for you to check first.
 
+## Testing against the demo company
+Set `TALLY_COMPANY_NAME=ARCARDIA (Demo Purpose Only)` (exactly as TallyPrime shows it) before testing, and set it back to
+`ARCADIA AUTOHUB PRIVATE LIMITED (From October 2026)` for live use. The demo only gives valid test results if it matches the
+main company, so check these in the demo first:
+
+* F11: GST Yes, Bill-wise entry Yes, Maintain Inventory + Integrate Accounts with Inventory Yes; cost centres, batches, price levels,
+  discount column No. GST details: Karnataka, Regular, same GSTIN.
+* Ledgers, with exactly these names: `Sales`, `SALES RETURN` (both Sales Accounts, GST applicable, affect stock),
+  `Output CGST 9%`, `Output SGST 9%`, `Output IGST 18%` (Duties & Taxes, type GST, duty head CGST / SGST/UTGST / IGST, rate 9 / 9 / 18),
+  `Delivery Charges` (Direct Incomes, GST **Not Applicable**), `Round Off` (Indirect Expenses).
+* Stock items: unit Nos, Goods, Taxable, CGST 9 + SGST 9 + IGST 18, state Any. The app creates missing items and customer ledgers itself.
+* Customer ledgers: Sundry Debtors, Unregistered/Consumer, bill-wise No, named `<name> - <10-digit mobile>`.
+
+GST rule the app applies: place of supply Karnataka -> Output CGST 9% + Output SGST 9%; any other state -> Output IGST 18%.
+
 ## Rules
 | Event (bill already in Tally) | What happens |
 |---|---|
