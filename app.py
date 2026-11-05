@@ -26,10 +26,14 @@ from reportlab.pdfgen import canvas as pdf_canvas
 
 from invoice import build_invoice_pdf
 import tally_export
+import tally_outbox
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 VALID_STATUSES = {"pending", "purchased", "stock", "na", "refunded", "wait"}
 VALID_ROLES = {"owner", "staff", "telecaller", "packer", "accounts"}
+# Live push to TallyPrime (sales + credit notes via the bridge program on the Tally PC).
+# Off unless TALLY_LIVE_PUSH=1, so nothing changes until you switch it on.
+TALLY_LIVE_PUSH = os.environ.get("TALLY_LIVE_PUSH", "").strip().lower() in ("1", "true", "yes", "on")
 
 app = Flask(__name__)
 
@@ -306,6 +310,28 @@ def init_db():
         ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
         ALTER TABLE users ADD CONSTRAINT users_role_check
             CHECK (role IN ('owner', 'staff', 'telecaller', 'packer', 'accounts'));
+        """
+    )
+    # Tally outbox: every voucher to be sent to TallyPrime, with a snapshot of what was sent.
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tally_outbox (
+            id SERIAL PRIMARY KEY,
+            order_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            voucher_number TEXT,
+            reason TEXT,
+            payload TEXT NOT NULL,
+            masters_xml TEXT,
+            voucher_xml TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at TEXT,
+            sent_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS tally_outbox_status_idx ON tally_outbox (status, id);
+        CREATE INDEX IF NOT EXISTS tally_outbox_order_idx ON tally_outbox (order_id);
         """
     )
     # Seed a default owner account on first run, so there's always a way in.
@@ -2607,6 +2633,19 @@ def _issue_invoice(db, order_id, cod_threshold):
     db.commit()
     save_cur.close()
 
+    # Live push: queue the sales voucher for Tally the moment the invoice number is issued.
+    # Never blocks printing -- a failure here is logged and shown on the /tally page.
+    if is_first_print and TALLY_LIVE_PUSH:
+        sale_order = dict(order_dict)
+        sale_order["invoice_number"] = invoice_number
+        sale_order["invoice_date"] = invoice_date
+        hook_cur = db.cursor()
+        _tally_call(hook_cur, tally_outbox.enqueue_sale, sale_order,
+                    [dict(i) for i in billing_items], order_dict.get("payment_type") or "prepaid",
+                    _tally_company())
+        db.commit()
+        hook_cur.close()
+
     return order_dict, [dict(i) for i in billing_items], invoice_number, invoice_date, is_first_print
 
 
@@ -2766,6 +2805,10 @@ def _collect_invoices_for_tally(date_from, date_to, only_new):
     # Cancelled bills were re-created directly in Tally, so exporting them
     # would duplicate the voucher there.
     query += " AND bill_cancelled = false"
+    if TALLY_LIVE_PUSH:
+        # Bills handled by the live push must not also go out in a manual XML file.
+        query += (" AND NOT EXISTS (SELECT 1 FROM tally_outbox t WHERE t.order_id = orders.shopify_order_id "
+                  "AND t.kind = 'sale' AND t.status <> 'void')")
     if only_new:
         query += " AND (tally_exported_at IS NULL OR tally_exported_at = '')"
     cur.execute(query)
@@ -2911,6 +2954,342 @@ def api_export_tally_xlsx():
     return resp
 
 
+# ---------------------------------------------------------------------------
+# Tally live push -- outbox helpers, bridge endpoints, status page
+# (the sales / credit-note XML itself is built in tally_export.py; the queue and
+#  the cancel/refund rules live in tally_outbox.py)
+# ---------------------------------------------------------------------------
+
+def _tally_company():
+    return os.environ.get("TALLY_COMPANY_NAME", "")
+
+
+def _tally_call(cur, fn, *args, **kwargs):
+    """Run an outbox operation inside a savepoint, so a problem there can never break (or
+    roll back) the cancel / refund / print it was triggered by."""
+    try:
+        cur.execute("SAVEPOINT tally_hook")
+        res = fn(cur, *args, **kwargs)
+        cur.execute("RELEASE SAVEPOINT tally_hook")
+        return res
+    except Exception as exc:
+        app.logger.exception("Tally outbox operation failed")
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT tally_hook")
+        except Exception:
+            pass
+        return {"action": "error", "message": f"Could not queue for Tally: {type(exc).__name__}: {exc}"}
+
+
+def _tally_bundle(cur, order_id):
+    """(order_dict, billing_items, payment_type) for an invoiced order, or None."""
+    cur.execute("SELECT * FROM orders WHERE shopify_order_id = %s", (order_id,))
+    order = cur.fetchone()
+    if not order or not order["invoice_number"] or not order["invoice_date"]:
+        return None
+    cur.execute("SELECT * FROM items WHERE shopify_order_id = %s ORDER BY sort_order", (order_id,))
+    items = [dict(i) for i in cur.fetchall() if i["status"] in ("purchased", "stock")]
+    if not items:
+        return None
+    cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
+    ptype = resolve_payment_type(order, cod_threshold) or "prepaid"
+    return dict(order), items, ptype
+
+
+def _tally_requeue(cur, order_id):
+    """Callback for tally_outbox.restore(): re-queue a sale that never reached Tally."""
+    def go():
+        bundle = _tally_bundle(cur, order_id)
+        if not bundle:
+            return {"action": "none"}
+        od, items, ptype = bundle
+        return tally_outbox.enqueue_sale(cur, od, items, ptype, _tally_company())
+    return go
+
+
+def _bridge_ok():
+    import hmac
+    expected = os.environ.get("TALLY_BRIDGE_KEY", "").encode()
+    provided = request.headers.get("X-Tally-Key", "").encode()
+    return bool(expected) and hmac.compare_digest(provided, expected)
+
+
+@app.route("/api/tally/pending", methods=["GET"])
+def api_tally_pending():
+    """Called by tally_bridge.py on the Tally PC (key-authenticated, no login session)."""
+    if not _bridge_ok():
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        limit = max(1, min(int(request.args.get("limit", 20)), 50))
+    except ValueError:
+        limit = 20
+    db = get_db()
+    cur = db.cursor()
+    rows = tally_outbox.fetch_pending(cur, limit)
+    cur.execute(
+        "INSERT INTO settings (key, value) VALUES (%s, %s) "
+        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        (tally_outbox.BRIDGE_SEEN_KEY, datetime.now(timezone.utc).isoformat()),
+    )
+    db.commit()
+    cur.close()
+    return jsonify({"items": rows})
+
+
+@app.route("/api/tally/ack", methods=["POST"])
+def api_tally_ack():
+    """The bridge reports what TallyPrime answered for one outbox row."""
+    if not _bridge_ok():
+        return jsonify({"error": "unauthorized"}), 401
+    data = request.get_json(force=True) or {}
+    try:
+        row_id = int(data.get("id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "id is required"}), 400
+    db = get_db()
+    cur = db.cursor()
+    info = tally_outbox.ack(cur, row_id, bool(data.get("ok")), str(data.get("message") or ""))
+    if info is None:
+        cur.close()
+        return jsonify({"error": "unknown id"}), 404
+    follow = None
+    if data.get("ok") and info["was_void"] and info["kind"] == "sale" and not info.get("duplicate"):
+        # The sale reached Tally after we had cancelled it here: reverse it properly now.
+        cur.execute("SELECT cancelled, bill_cancelled FROM orders WHERE shopify_order_id = %s",
+                    (info["order_id"],))
+        o = cur.fetchone()
+        if o and (o["cancelled"] or o["bill_cancelled"]):
+            follow = _tally_call(cur, tally_outbox.reverse, info["order_id"], None,
+                                 "Cancelled while being sent", _tally_company())
+    db.commit()
+    cur.close()
+    return jsonify({"ok": True, "follow_up": follow})
+
+
+@app.route("/api/tally/outbox", methods=["GET"])
+@accounts_or_owner_required
+def api_tally_outbox():
+    db = get_db()
+    cur = db.cursor()
+    rows, counts = tally_outbox.list_rows(cur)
+    cur.execute("SELECT value FROM settings WHERE key = %s", (tally_outbox.CN_COUNTER_KEY,))
+    cn = cur.fetchone()
+    cur.execute("SELECT value FROM settings WHERE key = %s", (tally_outbox.BRIDGE_SEEN_KEY,))
+    seen = cur.fetchone()
+    cur.close()
+    return jsonify({
+        "live_push": TALLY_LIVE_PUSH,
+        "bridge_key_set": bool(os.environ.get("TALLY_BRIDGE_KEY")),
+        "company": _tally_company(),
+        "bridge_last_seen": seen["value"] if seen else None,
+        "next_credit_note_no": int(cn["value"]) if cn else int(os.environ.get("TALLY_CN_START", "2") or 2),
+        "counts": counts,
+        "rows": rows,
+    })
+
+
+@app.route("/api/tally/retry/<int:row_id>", methods=["POST"])
+@accounts_or_owner_required
+def api_tally_retry(row_id):
+    db = get_db()
+    cur = db.cursor()
+    ok = tally_outbox.retry(cur, row_id)
+    db.commit()
+    cur.close()
+    if not ok:
+        return jsonify({"error": "Only rows in Error can be retried"}), 400
+    return jsonify({"ok": True})
+
+
+@app.route("/api/tally/cn-counter", methods=["POST"])
+@accounts_or_owner_required
+def api_tally_cn_counter():
+    """Set the next credit-note number (so CR/<n>/yy continues after the ones already in Tally)."""
+    data = request.get_json(force=True) or {}
+    try:
+        n = int(data.get("next"))
+        if n < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "next must be a whole number >= 1"}), 400
+    db = get_db()
+    cur = db.cursor()
+    tally_outbox.set_cn_next(cur, n)
+    db.commit()
+    cur.close()
+    return jsonify({"ok": True, "next": n})
+
+
+@app.route("/api/tally/outbox.xml", methods=["GET"])
+@accounts_or_owner_required
+def api_tally_outbox_xml():
+    """Manual alternative to the bridge: download everything still pending as one Tally XML
+    (sales + credit notes, in order). ?mark=1 marks those rows as sent afterwards."""
+    db = get_db()
+    cur = db.cursor()
+    ids, records = tally_outbox.pending_records(cur)
+    if not records:
+        cur.close()
+        return jsonify({"error": "Nothing pending for Tally."}), 404
+    xml = tally_export.build_tally_xml(records, _tally_company())
+    if request.args.get("mark") == "1":
+        tally_outbox.mark_sent(cur, ids)
+        db.commit()
+    cur.close()
+    resp = app.response_class(xml.encode("utf-8"), mimetype="application/xml")
+    resp.headers["Content-Disposition"] = 'attachment; filename="tally_pending.xml"'
+    resp.headers["X-Voucher-Count"] = str(len(records))
+    return resp
+
+
+def _legacy_preview(cur):
+    """Cancelled bills whose sale is still sitting in Tally from an earlier manual XML export."""
+    out = []
+    for o in tally_outbox.legacy_candidates(cur):
+        entry = {
+            "order_id": o["shopify_order_id"], "order_name": o.get("order_name"),
+            "invoice_number": o.get("invoice_number"), "customer": o.get("customer_name"),
+            "why": "bill cancelled" if o.get("bill_cancelled") else "order cancelled",
+            "reason": o.get("bill_cancelled_reason") or o.get("cancelled_reason") or "",
+        }
+        bundle = _tally_bundle(cur, o["shopify_order_id"])
+        if not bundle:
+            entry.update(amount=None, saved_total=None, matches=False,
+                         note="no billable items left - check this one in Tally by hand")
+            out.append(entry)
+            continue
+        od, items, ptype = bundle
+        rec = tally_export.build_records([(od, items, ptype)])[0]
+        try:
+            saved = float(o.get("invoice_total"))
+        except (TypeError, ValueError):
+            saved = None
+        matches = saved is not None and abs(saved - rec["grand_total"]) < 0.015
+        entry.update(amount=rec["grand_total"], saved_total=saved, matches=matches,
+                     note="" if matches else "total differs from the printed invoice - check before creating")
+        out.append(entry)
+    return out
+
+
+@app.route("/api/tally/backfill", methods=["GET", "POST"])
+@accounts_or_owner_required
+def api_tally_backfill():
+    """GET  -> list cancelled bills that are still in Tally's Sales (nothing is changed).
+    POST -> {"confirm": true, "order_ids": [...], "cn_date": "YYYY-MM-DD"} queues a credit note for
+            each. Without order_ids only the rows whose total matches the printed invoice are used."""
+    db = get_db()
+    cur = db.cursor()
+    previews = _legacy_preview(cur)
+    if request.method == "GET":
+        cur.close()
+        return jsonify({"candidates": previews})
+    data = request.get_json(force=True) or {}
+    if not data.get("confirm"):
+        cur.close()
+        return jsonify({"error": "Send confirm: true to create the credit notes"}), 400
+    cn_dt = None
+    if data.get("cn_date"):
+        try:
+            cn_dt = datetime.strptime(str(data["cn_date"]), "%Y-%m-%d")
+        except ValueError:
+            cur.close()
+            return jsonify({"error": "cn_date must be YYYY-MM-DD"}), 400
+    chosen = data.get("order_ids")
+    wanted = set(chosen) if chosen is not None else {p["order_id"] for p in previews if p["matches"]}
+    created, skipped = [], []
+    for p in previews:
+        if p["order_id"] not in wanted:
+            continue
+        bundle = _tally_bundle(cur, p["order_id"])
+        if not bundle:
+            skipped.append({"order_id": p["order_id"], "why": "no billable items"})
+            continue
+        od, items, ptype = bundle
+        label = "Bill cancelled" if p["why"] == "bill cancelled" else "Order cancelled"
+        res = _tally_call(cur, tally_outbox.enqueue_legacy_credit_note, od, items, ptype,
+                          f"{label}: {p['reason']}".strip(": "), _tally_company(), cn_dt)
+        (created if res.get("action") == "credit_note_queued" else skipped).append(
+            {"order_id": p["order_id"], "order_name": p["order_name"], **res})
+    db.commit()
+    cur.close()
+    return jsonify({"ok": True, "created": created, "skipped": skipped})
+
+
+TALLY_PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Tally sync</title>
+<style>
+body{font:14px system-ui,sans-serif;margin:16px;max-width:1100px;color:#222}
+table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #ddd;padding:6px 8px;text-align:left;vertical-align:top}
+.b{padding:2px 8px;border-radius:10px;font-size:12px}.pending{background:#fff3cd}.sent{background:#d1e7dd}
+.error{background:#f8d7da}.void{background:#e2e3e5}.box{border:1px solid #ddd;border-radius:8px;padding:12px;margin:12px 0}
+button{padding:4px 10px;cursor:pointer}.muted{color:#666}.err{color:#a00;font-size:12px}
+</style></head><body>
+<h2>Tally sync</h2>
+<div id="top" class="box">Loading...</div>
+<div class="box">Next credit note number: CR/<input id="cnn" type="number" min="1" style="width:80px">/yy
+ <button id="cnb">Save</button> <span class="muted">Set this one above the last CR number already in Tally.</span></div>
+<div class="box"><b>Cancelled bills that are still in Tally's Sales</b>
+<div class="muted">Bills exported to Tally earlier (as an XML file) that were cancelled afterwards. Review, then create credit notes.</div>
+<p><button id="prev">Check now</button>
+ Credit note date: <input type="date" id="cndate"> <span class="muted">(blank = today)</span></p>
+<div id="legacy"></div></div>
+<h3>Vouchers sent to Tally</h3><div id="rows"></div>
+<script>
+function el(t,txt,cls){var e=document.createElement(t);if(txt!==undefined)e.textContent=txt;if(cls)e.className=cls;return e}
+function money(n){return n==null?'':Number(n).toFixed(2)}
+async function api(u,opt){var r=await fetch(u,opt);var j=await r.json().catch(function(){return{}});if(!r.ok)throw new Error(j.error||r.status);return j}
+function ago(iso){if(!iso)return 'never';var m=Math.round((Date.now()-new Date(iso))/60000);return m<1?'just now':m<60?m+' min ago':Math.round(m/60)+' h ago'}
+async function load(){
+ var d=await api('/api/tally/outbox');var top=document.getElementById('top');top.textContent='';
+ var seenMin=d.bridge_last_seen?(Date.now()-new Date(d.bridge_last_seen))/60000:null;
+ var ok=seenMin!==null&&seenMin<3;
+ top.appendChild(el('div','Bridge on the Tally PC: '+(ok?'running':'NOT seen')+' (last contact '+ago(d.bridge_last_seen)+')',ok?'':'err'));
+ top.appendChild(el('div','Live push: '+(d.live_push?'ON':'OFF - set TALLY_LIVE_PUSH=1')+'   |   Bridge key set: '+(d.bridge_key_set?'yes':'NO - set TALLY_BRIDGE_KEY')));
+ top.appendChild(el('div','Company: '+(d.company||'(whichever is open in Tally)')+'   |   Next credit note number: '+d.next_credit_note_no));
+ var c=d.counts||{};top.appendChild(el('div','Pending '+(c.pending||0)+'  |  Sent '+(c.sent||0)+'  |  Error '+(c.error||0)+'  |  Cancelled before sending '+(c.void||0)));
+ var host=document.getElementById('rows');host.textContent='';
+ var t=el('table');var h=el('tr');['#','Type','Voucher','Order','Customer','Amount','Status','Note','Created'].forEach(function(x){h.appendChild(el('th',x))});t.appendChild(h);
+ d.rows.forEach(function(r){var tr=el('tr');
+  tr.appendChild(el('td',r.id));tr.appendChild(el('td',r.kind==='sale'?'Sale':'Credit note'));
+  tr.appendChild(el('td',r.voucher_number+(r.orig_invoice?' (for '+r.orig_invoice+')':'')));
+  tr.appendChild(el('td',r.order_name||''));tr.appendChild(el('td',r.customer||''));tr.appendChild(el('td',money(r.amount)));
+  var st=el('td');st.appendChild(el('span',r.status,'b '+r.status));tr.appendChild(st);
+  var nt=el('td',r.reason||'');if(r.last_error){nt.appendChild(el('div',r.last_error,'err'))}
+  if(r.status==='error'){var b=el('button','Retry');b.onclick=async function(){try{await api('/api/tally/retry/'+r.id,{method:'POST'});load()}catch(e){alert(e.message)}};nt.appendChild(b)}
+  tr.appendChild(nt);tr.appendChild(el('td',(r.created_at||'').slice(0,16).replace('T',' ')));t.appendChild(tr)});
+ host.appendChild(t)}
+var legacyRows=[];
+document.getElementById('prev').onclick=async function(){
+ var host=document.getElementById('legacy');host.textContent='Checking...';
+ try{var d=await api('/api/tally/backfill');legacyRows=d.candidates;host.textContent='';
+  if(!legacyRows.length){host.textContent='Nothing to fix - no cancelled bill is waiting.';return}
+  var t=el('table');var h=el('tr');['','Invoice','Order','Customer','Amount','Why','Check'].forEach(function(x){h.appendChild(el('th',x))});t.appendChild(h);
+  legacyRows.forEach(function(r,i){var tr=el('tr');var td=el('td');var cb=el('input');cb.type='checkbox';cb.checked=!!r.matches;cb.disabled=r.amount==null;cb.id='lg'+i;td.appendChild(cb);tr.appendChild(td);
+   tr.appendChild(el('td',r.invoice_number));tr.appendChild(el('td',r.order_name||''));tr.appendChild(el('td',r.customer||''));tr.appendChild(el('td',money(r.amount)));
+   tr.appendChild(el('td',r.why+(r.reason?': '+r.reason:'')));tr.appendChild(el('td',r.note||'ok',r.note?'err':''));t.appendChild(tr)});
+  host.appendChild(t);var go=el('button','Create credit notes for ticked rows');go.style.marginTop='10px';
+  go.onclick=async function(){var ids=[];legacyRows.forEach(function(r,i){if(document.getElementById('lg'+i).checked)ids.push(r.order_id)});
+   if(!ids.length){alert('Nothing ticked');return}
+   if(!confirm('Queue '+ids.length+' credit note(s) for Tally? Make sure none of them was already entered in Tally by hand.'))return;
+   try{var body={confirm:true,order_ids:ids};var dt=document.getElementById('cndate').value;if(dt)body.cn_date=dt;
+    var res=await api('/api/tally/backfill',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    alert('Queued '+res.created.length+' credit note(s)'+(res.skipped.length?', skipped '+res.skipped.length:''));document.getElementById('prev').click();load()}catch(e){alert(e.message)}};
+  host.appendChild(go)}catch(e){host.textContent=e.message}};
+var cnLoaded=false;
+document.getElementById('cnb').onclick=async function(){var n=parseInt(document.getElementById('cnn').value,10);
+ if(!(n>=1)){alert('Enter a number');return}
+ try{await api('/api/tally/cn-counter',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({next:n})});alert('Saved: next credit note is CR/'+n+'/yy');load()}catch(e){alert(e.message)}};
+var _load=load;load=async function(){await _load();if(!cnLoaded){var d=await api('/api/tally/outbox');document.getElementById('cnn').value=d.next_credit_note_no;cnLoaded=true}};
+load();setInterval(load,15000);
+</script></body></html>"""
+
+
+@app.route("/tally")
+@accounts_or_owner_required
+def tally_page():
+    return app.response_class(TALLY_PAGE, mimetype="text/html")
+
+
 @app.route("/api/orders/<order_id>/bill-cancelled", methods=["POST"])
 @accounts_or_owner_required
 def api_update_bill_cancelled(order_id):
@@ -2948,6 +3327,14 @@ def api_update_bill_cancelled(order_id):
         odm_event(cur, "cancelled", "set", order_id)
     elif not cancelled and row["was"] and not row["other"]:
         odm_event(cur, "cancelled", "clear", order_id)
+    # Tally: a cancelled bill that is already in Tally becomes a Credit Note (sales return)
+    tally_res = None
+    if TALLY_LIVE_PUSH:
+        if cancelled and not row["was"]:
+            tally_res = _tally_call(cur, tally_outbox.reverse, order_id, None,
+                                    f"Bill cancelled: {reason}", _tally_company())
+        elif not cancelled and row["was"] and not row["other"]:
+            tally_res = _tally_call(cur, tally_outbox.restore, order_id, _tally_requeue(cur, order_id))
     label = row["invoice_number"] or "(not printed)"
     log_activity(
         cur, None, row["order_name"] or order_id, "bill_cancelled_update",
@@ -2960,6 +3347,7 @@ def api_update_bill_cancelled(order_id):
     return jsonify({
         "ok": True, "order_id": order_id, "bill_cancelled": cancelled,
         "bill_cancelled_reason": vals[1], "bill_cancelled_by": vals[2], "bill_cancelled_at": vals[3],
+        "tally": tally_res,
     })
 
 
@@ -3109,6 +3497,7 @@ def api_update_item_status(item_id):
         cur.close()
         return jsonify({"error": "item not found"}), 404
 
+    tally_res = None
     if status != row["old_status"]:
         log_activity(cur, item_id, row["title"], "status_update",
                      f"{session['name']} changed status: {row['old_status']} -> {status}",
@@ -3118,9 +3507,16 @@ def api_update_item_status(item_id):
             odm_event(cur, "refunded", "set", row["shopify_order_id"], [item_id])
         elif row["old_status"] == "refunded":
             odm_event(cur, "refunded", "clear", row["shopify_order_id"], [item_id])
+        # Tally: an item refunded after its invoice went to Tally becomes a (partial) Credit Note
+        if TALLY_LIVE_PUSH:
+            if status == "refunded":
+                tally_res = _tally_call(cur, tally_outbox.reverse, row["shopify_order_id"], [str(item_id)],
+                                        f"Item refunded: {row['title']}", _tally_company())
+            elif row["old_status"] == "refunded":
+                tally_res = _tally_call(cur, tally_outbox.unrefund, row["shopify_order_id"], str(item_id))
     db.commit()
     cur.close()
-    return jsonify({"ok": True, "id": item_id, "status": status})
+    return jsonify({"ok": True, "id": item_id, "status": status, "tally": tally_res})
 
 
 @app.route("/api/items/<item_id>/purchase-amount", methods=["POST"])
@@ -3550,8 +3946,12 @@ def api_edit_order(order_id):
     # exported, clear that mark so it shows up again in the next "Only new" XML.
     was_exported = bool(order["tally_exported_at"])
     if changes and was_exported:
-        cur.execute("UPDATE orders SET tally_exported_at = NULL WHERE shopify_order_id = %s", (order_id,))
-        changes.append("marked for Tally re-export")
+        if TALLY_LIVE_PUSH and tally_outbox.has_sale(cur, order_id):
+            # Already pushed live: re-exporting would create a duplicate sale in Tally.
+            changes.append("NOTE: this bill is already in Tally; the edit was NOT sent there")
+        else:
+            cur.execute("UPDATE orders SET tally_exported_at = NULL WHERE shopify_order_id = %s", (order_id,))
+            changes.append("marked for Tally re-export")
     if changes:
         log_activity(cur, None, order["order_name"] or order_id, "order_edit",
                      f"{who} edited order: " + "; ".join(changes), order_id=order_id)
@@ -4038,6 +4438,15 @@ def api_update_order_cancelled(order_id):
     elif not cancelled and row["was"] and not row["other"]:
         odm_event(cur, "cancelled", "clear", order_id)
 
+    # Tally: a cancelled order whose invoice is already in Tally becomes a Credit Note
+    tally_res = None
+    if TALLY_LIVE_PUSH:
+        if cancelled and not row["was"]:
+            tally_res = _tally_call(cur, tally_outbox.reverse, order_id, None,
+                                    f"Order cancelled: {reason}", _tally_company())
+        elif not cancelled and row["was"] and not row["other"]:
+            tally_res = _tally_call(cur, tally_outbox.restore, order_id, _tally_requeue(cur, order_id))
+
     log_activity(
         cur, None, row["order_name"] or order_id, "cancelled_update",
         f"{who} marked order {row['order_name'] or order_id} as "
@@ -4053,6 +4462,7 @@ def api_update_order_cancelled(order_id):
         "cancelled_reason": cancelled_reason,
         "cancelled_by": cancelled_by,
         "cancelled_at": cancelled_at,
+        "tally": tally_res,
     })
 
 

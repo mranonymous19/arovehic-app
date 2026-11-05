@@ -36,6 +36,10 @@ CGST_LEDGER = os.environ.get("TALLY_CGST_LEDGER", "Output CGST 9%")
 SGST_LEDGER = os.environ.get("TALLY_SGST_LEDGER", "Output SGST 9%")
 DELIVERY_LEDGER = os.environ.get("TALLY_DELIVERY_LEDGER", "Delivery Charges")
 ROUNDOFF_LEDGER = os.environ.get("TALLY_ROUNDOFF_LEDGER", "Round Off")
+# Credit notes (sales returns). Ledger name must already exist in Tally; the voucher
+# layout was copied from a Credit Note exported from the real company.
+SALES_RETURN_LEDGER = os.environ.get("TALLY_SALES_RETURN_LEDGER", "SALES RETURN")
+CREDIT_NOTE_TYPE = os.environ.get("TALLY_CREDIT_NOTE_TYPE", "Credit Note")
 VOUCHER_TYPE = os.environ.get("TALLY_VOUCHER_TYPE", "Sales")
 DEFAULT_COMPANY = os.environ.get("TALLY_COMPANY_NAME", "")
 UOM = os.environ.get("TALLY_UOM", "Nos")  # unit of measure shown against each item's qty/rate
@@ -52,6 +56,7 @@ HSN_CODE = os.environ.get("TALLY_HSN_CODE", "")  # optional; printed on the invo
 # user-defined value and the GST details are ignored.
 TALLY_APPLICABLE = "&#4; Applicable"
 TALLY_ANY = "&#4; Any"
+TALLY_NOT_APPLICABLE = "&#4; Not Applicable"
 
 # Tally's own spelling for the few states that differ from common usage.
 _TALLY_STATE_NAMES = {
@@ -154,7 +159,8 @@ def compute_invoice(order, items):
         rate = round(line_base_raw / qty, 2) if qty else 0.0
         line_base = round(rate * qty, 2)
         total_base += line_base
-        item_entries.append({"name": name, "qty": qty, "rate": rate, "amount": line_base})
+        item_entries.append({"name": name, "qty": qty, "rate": rate, "amount": line_base,
+                              "incl": round(line_incl, 2), "item_id": it.get("id")})
 
     total_base = round(total_base, 2)
     # Tax as (inclusive total - taxable value), not base x 18%. Deriving it this
@@ -185,6 +191,7 @@ def build_records(invoices):
         addr_parts = [order.get("shipping_address1"), order.get("shipping_address2"), order.get("shipping_city")]
         records.append(
             {
+                "kind": "sale",
                 "order": order,
                 "dt": dt,
                 "invoice_number": order.get("invoice_number"),
@@ -399,7 +406,7 @@ def _voucher(rec):
     )
 
 
-def build_tally_xml(records, company=""):
+def build_tally_xml(records, company="", masters=True, vouchers=True):
     company = company or DEFAULT_COMPANY
     company_tag = f"<SVCURRENTCOMPANY>{x(company)}</SVCURRENTCOMPANY>" if company else ""
 
@@ -413,17 +420,18 @@ def build_tally_xml(records, company=""):
             f"<RATEOFTAXCALCULATION>{rate:g}</RATEOFTAXCALCULATION>",
         )
 
-    masters = [
-        _unit_master(UOM),
-        _ledger_master(SALES_LEDGER, "Sales Accounts"),
-    ]
+    master_msgs = [_unit_master(UOM)]
+    if any(r.get("kind", "sale") != "credit_note" for r in records) or not records:
+        master_msgs.append(_ledger_master(SALES_LEDGER, "Sales Accounts"))
+    # NOTE: the Sales Return ledger is deliberately NOT created/updated here -- it must
+    # already exist in Tally with its own GST settings, and we must not overwrite them.
     if any(not r["is_intrastate"] for r in records):
-        masters.append(tax_ledger(IGST_LEDGER, "IGST", GST_RATE * 100))
+        master_msgs.append(tax_ledger(IGST_LEDGER, "IGST", GST_RATE * 100))
     if any(r["is_intrastate"] for r in records):
-        masters.append(tax_ledger(CGST_LEDGER, "CGST", GST_RATE * 50))
-        masters.append(tax_ledger(SGST_LEDGER, "SGST/UTGST", GST_RATE * 50))
+        master_msgs.append(tax_ledger(CGST_LEDGER, "CGST", GST_RATE * 50))
+        master_msgs.append(tax_ledger(SGST_LEDGER, "SGST/UTGST", GST_RATE * 50))
     if any(r["delivery"] for r in records):
-        masters.append(
+        master_msgs.append(
             _ledger_master(
                 DELIVERY_LEDGER,
                 "Direct Incomes",
@@ -434,22 +442,24 @@ def build_tally_xml(records, company=""):
             )
         )
     if any(r["round_off"] for r in records):
-        masters.append(_ledger_master(ROUNDOFF_LEDGER, "Indirect Expenses"))
+        master_msgs.append(_ledger_master(ROUNDOFF_LEDGER, "Indirect Expenses"))
 
     seen_items = set()
     for rec in records:
         for it in rec["items"]:
             if it["name"] not in seen_items:
                 seen_items.add(it["name"])
-                masters.append(_stock_item_master(it["name"], UOM, since))
+                master_msgs.append(_stock_item_master(it["name"], UOM, since))
 
     seen = set()
     for rec in records:
         if rec["ledger"] not in seen:
             seen.add(rec["ledger"])
-            masters.append(_customer_master(rec))
+            master_msgs.append(_customer_master(rec))
 
-    vouchers = [_voucher(r) for r in records]
+    voucher_msgs = [
+        _credit_note_voucher(r) if r.get("kind") == "credit_note" else _voucher(r) for r in records
+    ]
 
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -458,8 +468,196 @@ def build_tally_xml(records, company=""):
         "<BODY><IMPORTDATA>"
         "<REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME>"
         f"<STATICVARIABLES>{company_tag}</STATICVARIABLES></REQUESTDESC>"
-        "<REQUESTDATA>" + "".join(masters) + "".join(vouchers) + "</REQUESTDATA>"
+        "<REQUESTDATA>"
+        + ("".join(master_msgs) if masters else "")
+        + ("".join(voucher_msgs) if vouchers else "")
+        + "</REQUESTDATA>"
         "</IMPORTDATA></BODY></ENVELOPE>"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Credit notes (sales returns) -- cancelled bills / refunded items
+# ---------------------------------------------------------------------------
+# A credit note exactly reverses (all or part of) a sales voucher that Tally already
+# has. Layout copied from a Credit Note exported from the live company:
+#     Cr  <customer ledger>        grand total          (party)
+#     Dr  SALES RETURN             taxable value        (via each stock item line)
+#     Dr  Output IGST 18%          IGST   (or CGST 9% + SGST 9% for same-state)
+#     Dr  Delivery Charges         delivery  (only when the whole bill is reversed)
+#     +/- Round Off                only when the whole bill is reversed
+# Figures always come from the SALE SNAPSHOT (what was actually sent to Tally), never
+# from the order as it looks today, so the reversal is exact even if the order was edited.
+
+def record_to_payload(rec):
+    """JSON-safe copy of a sale/credit-note record (drops the raw order dict)."""
+    out = {k: v for k, v in rec.items() if k != "order"}
+    for k in ("dt", "orig_dt"):
+        if isinstance(out.get(k), datetime):
+            out[k] = out[k].isoformat()
+    return out
+
+
+def payload_to_record(p):
+    rec = dict(p)
+    for k in ("dt", "orig_dt"):
+        if isinstance(rec.get(k), str):
+            rec[k] = datetime.fromisoformat(rec[k])
+    rec.setdefault("order", {})
+    return rec
+
+
+def plan_credit_note(sale, cn_number, cn_dt, reason="", item_ids=None, reversed_ids=(), prior_igst=0.0):
+    """Build the credit-note record that reverses `sale` (a sale payload/record).
+
+    item_ids      -- reverse only these items (partial refund); None = everything left.
+    reversed_ids  -- items already reversed by earlier credit notes.
+    prior_igst    -- tax already reversed by earlier credit notes (so that the LAST note
+                     lands the total tax back to exactly what the sale booked).
+    Returns None if there is nothing left to reverse, else (record, ids_reversed, is_final).
+    When the last remaining item(s) are reversed, the delivery charge and round-off are
+    reversed too, so all credit notes together cancel the sale to the paisa.
+    """
+    reversed_ids = set(reversed_ids or ())
+    remaining = [it for it in sale["items"] if it.get("item_id") not in reversed_ids]
+    if item_ids is not None:
+        wanted = set(item_ids)
+        chosen = [it for it in remaining if it.get("item_id") in wanted]
+    else:
+        chosen = list(remaining)
+    if not chosen:
+        return None
+    is_final = len(chosen) == len(remaining)
+
+    base = round(sum(it["amount"] for it in chosen), 2)
+    incl = round(sum(it["incl"] for it in chosen), 2)
+    if is_final:
+        igst = round(sale["igst"] - prior_igst, 2)
+        delivery = sale["delivery"]
+        round_off = sale["round_off"]
+    else:
+        igst = round(incl - base, 2)
+        delivery = 0.0
+        round_off = 0.0
+    grand_total = round(base + igst + delivery + round_off, 2)
+
+    sale_dt = sale["dt"] if isinstance(sale["dt"], datetime) else datetime.fromisoformat(sale["dt"])
+    rec = {
+        "kind": "credit_note",
+        "order": {},
+        "dt": cn_dt,
+        "orig_dt": sale_dt,
+        "invoice_number": cn_number,
+        "orig_invoice_number": sale.get("invoice_number"),
+        "order_name": sale.get("order_name", ""),
+        "ledger": sale["ledger"],
+        "customer_name": sale.get("customer_name", ""),
+        "address_lines": sale.get("address_lines", []),
+        "state": sale.get("state", ""),
+        "is_intrastate": sale.get("is_intrastate", False),
+        "pincode": sale.get("pincode", ""),
+        "payment_type": sale.get("payment_type", ""),
+        "sales": base,
+        "igst": igst,
+        "delivery": delivery,
+        "round_off": round_off,
+        "grand_total": grand_total,
+        "lines": [f"{it['name']} x{it['qty']}" for it in chosen],
+        "items": chosen,
+        "reason": reason,
+        "reversed_item_ids": [it.get("item_id") for it in chosen],
+        "is_final": is_final,
+    }
+    return rec, rec["reversed_item_ids"], is_final
+
+
+def _credit_note_inventory_entry(item):
+    """One returned stock line: mirror of the sale line, booked to SALES RETURN."""
+    qty_unit = f"{item['qty']} {UOM}"
+    amount = -item["amount"]  # debit
+    return (
+        "<ALLINVENTORYENTRIES.LIST>"
+        f"<STOCKITEMNAME>{x(item['name'])}</STOCKITEMNAME>"
+        f"<GSTOVRDNISREVCHARGEAPPL>{TALLY_NOT_APPLICABLE}</GSTOVRDNISREVCHARGEAPPL>"
+        "<GSTOVRDNTAXABILITY>Taxable</GSTOVRDNTAXABILITY>"
+        "<GSTSOURCETYPE>Ledger</GSTSOURCETYPE>"
+        f"<GSTLEDGERSOURCE>{x(SALES_RETURN_LEDGER)}</GSTLEDGERSOURCE>"
+        "<GSTOVRDNTYPEOFSUPPLY>Goods</GSTOVRDNTYPEOFSUPPLY>"
+        "<GSTRATEINFERAPPLICABILITY>As per Masters/Company</GSTRATEINFERAPPLICABILITY>"
+        "<GSTHSNINFERAPPLICABILITY>As per Masters/Company</GSTHSNINFERAPPLICABILITY>"
+        "<ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>"
+        f"<RATE>{amt(item['rate'])}/{x(UOM)}</RATE>"
+        f"<AMOUNT>{amt(amount)}</AMOUNT>"
+        f"<ACTUALQTY>{x(qty_unit)}</ACTUALQTY>"
+        f"<BILLEDQTY>{x(qty_unit)}</BILLEDQTY>"
+        "<ACCOUNTINGALLOCATIONS.LIST>"
+        f"<LEDGERNAME>{x(SALES_RETURN_LEDGER)}</LEDGERNAME>"
+        "<ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>"
+        f"<AMOUNT>{amt(amount)}</AMOUNT>"
+        "</ACCOUNTINGALLOCATIONS.LIST>"
+        "</ALLINVENTORYENTRIES.LIST>"
+    )
+
+
+def _credit_note_voucher(rec):
+    date = rec["dt"].strftime("%Y%m%d")
+    ref_date = rec["orig_dt"].strftime("%Y%m%d")
+    narration = (
+        f"Credit note for invoice {rec.get('orig_invoice_number') or ''} | Order {rec['order_name']}"
+        + (f" | {rec['reason']}" if rec.get("reason") else "")
+        + " | " + "; ".join(rec["lines"])
+    )
+    addr = "".join(f"<BASICBUYERADDRESS>{x(a)}</BASICBUYERADDRESS>" for a in rec["address_lines"])
+    state = x(rec["state"])
+    state_tags = ""
+    if rec["state"]:
+        state_tags = (
+            f"<STATENAME>{state}</STATENAME>"
+            f"<PLACEOFSUPPLY>{state}</PLACEOFSUPPLY>"
+            f"<CONSIGNEESTATENAME>{state}</CONSIGNEESTATENAME>"
+        )
+
+    # Party is CREDITED (positive, not deemed positive); everything else is a debit.
+    entries = [_entry(rec["ledger"], rec["grand_total"], party=True)]
+    if rec["igst"]:
+        if rec["is_intrastate"]:
+            cgst = round(rec["igst"] / 2, 2)
+            sgst = round(rec["igst"] - cgst, 2)
+            entries.append(_entry(CGST_LEDGER, -cgst))
+            entries.append(_entry(SGST_LEDGER, -sgst))
+        else:
+            entries.append(_entry(IGST_LEDGER, -rec["igst"]))
+    if rec["delivery"]:
+        entries.append(_entry(DELIVERY_LEDGER, -rec["delivery"]))
+    if rec["round_off"]:
+        entries.append(_entry(ROUNDOFF_LEDGER, -rec["round_off"]))
+
+    inv_entries = [_credit_note_inventory_entry(it) for it in rec["items"]]
+
+    return (
+        '<TALLYMESSAGE xmlns:UDF="TallyUDF">'
+        f'<VOUCHER VCHTYPE="{x(CREDIT_NOTE_TYPE)}" ACTION="Create" OBJVIEW="Invoice Voucher View">'
+        f"<DATE>{date}</DATE>"
+        f"<REFERENCEDATE>{ref_date}</REFERENCEDATE>"
+        f"<EFFECTIVEDATE>{date}</EFFECTIVEDATE>"
+        f"<VOUCHERTYPENAME>{x(CREDIT_NOTE_TYPE)}</VOUCHERTYPENAME>"
+        f"<VOUCHERNUMBER>{x(rec['invoice_number'])}</VOUCHERNUMBER>"
+        f"<REFERENCE>{x(rec['order_name'])}</REFERENCE>"
+        f"<PARTYLEDGERNAME>{x(rec['ledger'])}</PARTYLEDGERNAME>"
+        f"<PARTYNAME>{x(rec['ledger'])}</PARTYNAME>"
+        f"<BASICBUYERNAME>{x(rec['customer_name'])}</BASICBUYERNAME>"
+        f"<PARTYMAILINGNAME>{x(rec['customer_name'])}</PARTYMAILINGNAME>"
+        f'<BASICBUYERADDRESS.LIST TYPE="String">{addr}</BASICBUYERADDRESS.LIST>'
+        f"{state_tags}"
+        "<COUNTRYOFRESIDENCE>India</COUNTRYOFRESIDENCE>"
+        "<GSTREGISTRATIONTYPE>Unregistered/Consumer</GSTREGISTRATIONTYPE>"
+        "<ISINVOICE>Yes</ISINVOICE>"
+        "<PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>"
+        "<VCHENTRYMODE>Item Invoice</VCHENTRYMODE>"
+        f"<NARRATION>{x(narration[:1000])}</NARRATION>"
+        + "".join(inv_entries)
+        + "".join(entries)
+        + "</VOUCHER></TALLYMESSAGE>"
     )
 
 
