@@ -279,8 +279,28 @@ def init_db():
             returned_by TEXT
         );
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS returned_at TEXT;
+        -- Shopify order items already sent to the Purchasing sheet ("Add Shopify orders"
+        -- button). Permanent: an item listed here is never sent again.
+        CREATE TABLE IF NOT EXISTS purchasing_sent (
+            item_id TEXT PRIMARY KEY,
+            order_name TEXT,
+            sent_at TEXT NOT NULL
+        );
         -- Earlier invoice numbers of an order whose number was changed (newest last, comma separated)
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS previous_invoice_numbers TEXT;
+
+        -- Purchasing sheet feed: one row per item of every BLR / KL order added with
+        -- Add Order (paste). A Supabase webhook on INSERT sends each row to the
+        -- Purchasing sheet (COD tab); each row is sent once.
+        CREATE TABLE IF NOT EXISTS purchasing_feed (
+            id SERIAL PRIMARY KEY,
+            order_id TEXT NOT NULL,
+            order_name TEXT NOT NULL,
+            item_id TEXT,
+            item_title TEXT NOT NULL,
+            qty INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
         -- Items added by hand (no order) have no order id
         ALTER TABLE return_stock ALTER COLUMN shopify_order_id DROP NOT NULL;
 
@@ -428,6 +448,10 @@ def odm_event(cur, kind, action, order_id, item_ids=None):
             "event_date, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (order_id, it["order_name"], it["id"], it["title"], amount, kind, action, event_date, now.isoformat()),
         )
+
+
+# Order IDs that go to the Purchasing sheet: "BLR 234", "BLR-234", "KL 230", "kl230" ...
+PURCHASING_FEED_RE = re.compile(r"^\s*(BLR|KL)\W*\d", re.IGNORECASE)
 
 
 def take_from_returns_stock(cur, item_id, order_id, order_name, title, variant_title, quantity):
@@ -1371,7 +1395,21 @@ def api_add_manual_order():
         log_activity(cur, item_id, item["title"], "manual_add",
                      f"{session['name']} added this item manually",
                      order_id=order_id)
-        take_from_returns_stock(cur, item_id, order_id, raw_order_id, item["title"], "", item["quantity"])
+        took_stock = take_from_returns_stock(cur, item_id, order_id, raw_order_id, item["title"], "", item["quantity"])
+        # BLR / KL orders: send the item to the Purchasing sheet (COD tab) — unless it was
+        # already filled from Returns stock, then there's nothing to buy
+        if PURCHASING_FEED_RE.match(raw_order_id) and not took_stock:
+            # ITEMS = "item for model" (the model is typed in the Vendor box, e.g.
+            # "packing kit for YAMAHA RX 100"); just the item if no model or already in the name
+            model = (item["vendor"] or "").strip()
+            sheet_item = item["title"]
+            if model and model.lower() not in sheet_item.lower():
+                sheet_item = f"{sheet_item} for {model}"
+            cur.execute(
+                "INSERT INTO purchasing_feed (order_id, order_name, item_id, item_title, qty, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (order_id, raw_order_id, item_id, sheet_item, item["quantity"], now),
+            )
 
     db.commit()
     cur.close()
@@ -2141,6 +2179,123 @@ def api_returns_manual():
     db.commit()
     cur.close()
     return jsonify({"ok": True, "title": title, "qty": qty})
+
+
+def _sheets_token_ok():
+    """Same secret token as Settings -> Google Sheet link (header or ?token=)."""
+    import hmac
+    expected = get_setting("sheets_token", "")
+    given = request.args.get("token") or request.headers.get("X-Sheets-Token") or ""
+    if not expected:
+        return jsonify({"error": "Google Sheet link is not set up — make a token in Settings"}), 403
+    if not hmac.compare_digest(given, expected):
+        return jsonify({"error": "Wrong token"}), 401
+    return None
+
+
+def _purchasing_window():
+    """From where the last button press stopped -> the last 10:00 AM that has passed (India time).
+    First press ever (or after a very long gap): the 24 hours before that 10 AM, at most 31 days back."""
+    from datetime import timedelta
+    ist = timezone(timedelta(hours=5, minutes=30))
+    now = datetime.now(ist)
+    end = now.replace(hour=10, minute=0, second=0, microsecond=0)
+    if now < end:
+        end -= timedelta(days=1)
+    start = end - timedelta(days=1)
+    last = get_setting("purchasing_shopify_last_to", "") or ""
+    if last:
+        try:
+            last_dt = datetime.fromisoformat(last).astimezone(ist)
+            if last_dt < start:
+                start = max(last_dt, end - timedelta(days=31))
+            elif last_dt >= end:
+                start = end - timedelta(days=1)   # already pressed today: same period again (adds 0 new)
+        except ValueError:
+            pass
+    return start, end
+
+
+@app.route("/api/purchasing/shopify", methods=["GET"])
+def api_purchasing_shopify():
+    """For the Purchasing sheet's "Add Shopify orders" button: Pending items of Shopify
+    orders that arrived between yesterday 10 AM and today 10 AM (India time), split
+    into COD / Prepaid, leaving out anything already sent. No login — sheet token."""
+    denied = _sheets_token_ok()
+    if denied:
+        return denied
+    start, end = _purchasing_window()
+    cod_threshold = float(get_setting("cod_shipping_threshold", "140") or 140)
+    cur = get_db().cursor()
+    cur.execute(
+        "SELECT o.shopify_order_id, o.order_name, o.shipping_amount, o.payment_type, o.created_at, "
+        "       i.id AS item_id, i.title, i.variant_title, i.quantity "
+        "FROM orders o JOIN items i ON i.shopify_order_id = o.shopify_order_id "
+        "WHERE o.shopify_order_id NOT LIKE 'manual-%%' "
+        "  AND o.deleted_at IS NULL AND NOT COALESCE(o.cancelled, false) AND NOT COALESCE(o.bill_cancelled, false) "
+        "  AND i.status = 'pending' "
+        "  AND NULLIF(o.created_at, '')::timestamptz >= %s AND NULLIF(o.created_at, '')::timestamptz < %s "
+        "  AND NOT EXISTS (SELECT 1 FROM purchasing_sent s WHERE s.item_id = i.id) "
+        "ORDER BY NULLIF(o.created_at, '')::timestamptz, o.order_name, i.sort_order",
+        (start.isoformat(), end.isoformat()),
+    )
+    out = {"cod": [], "prepaid": []}
+    for r in cur.fetchall():
+        title = (r["title"] or "").strip()
+        variant = (r["variant_title"] or "").strip()
+        if variant and variant.lower() != "default title" and variant.lower() not in title.lower():
+            title = f"{title} — {variant}"
+        ptype = resolve_payment_type(r, cod_threshold) or "prepaid"
+        out["cod" if ptype == "cod" else "prepaid"].append({
+            "item_id": r["item_id"],
+            "order_name": r["order_name"],
+            "items": f"{title} (QTY {r['quantity'] or 1})",
+        })
+    cur.close()
+    return jsonify({
+        "from": start.strftime("%d/%m/%Y %I:%M %p"),
+        "to": end.strftime("%d/%m/%Y %I:%M %p"),
+        "to_iso": end.isoformat(),
+        "cod": out["cod"],
+        "prepaid": out["prepaid"],
+    })
+
+
+@app.route("/api/purchasing/shopify/ack", methods=["POST"])
+def api_purchasing_shopify_ack():
+    """The sheet confirms which items it added; they are never sent again."""
+    denied = _sheets_token_ok()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    items = data.get("items") or []
+    now = datetime.now(timezone.utc).isoformat()
+    db = get_db()
+    cur = db.cursor()
+    n = 0
+    for it in items[:5000]:
+        item_id = str(it.get("item_id") or "").strip()
+        if not item_id:
+            continue
+        cur.execute(
+            "INSERT INTO purchasing_sent (item_id, order_name, sent_at) VALUES (%s, %s, %s) "
+            "ON CONFLICT (item_id) DO NOTHING",
+            (item_id, (it.get("order_name") or "")[:100], now),
+        )
+        n += cur.rowcount
+    db.commit()
+    cur.close()
+    # Remember where this press stopped, so the next press starts there (skipped days included)
+    to_iso = str(data.get("to_iso") or "").strip()
+    if to_iso:
+        try:
+            new_to = datetime.fromisoformat(to_iso)
+            old_to = get_setting("purchasing_shopify_last_to", "") or ""
+            if not old_to or new_to > datetime.fromisoformat(old_to):
+                set_setting("purchasing_shopify_last_to", new_to.isoformat())
+        except ValueError:
+            pass
+    return jsonify({"ok": True, "saved": n})
 
 
 @app.route("/api/returns/filled", methods=["GET"])
